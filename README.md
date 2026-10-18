@@ -5,8 +5,15 @@ No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
 ## Kya track karta hai
 - War / geopolitical news (GDELT free API)
 - Macro bearish: DXY up, US10Y yields up, Crude spike (Yahoo Finance free)
-- Whales: $10M+ moves (Whale Alert API key optional)
+- Whales $1M+: ETH (Etherscan free API, har 10 min latest block), BTC
+  (blockchain.info free API, har ~3 ghante latest block — BTC blocks ~8MB
+  hote hain, isliye free bandwidth limit ke hisaab se kam frequent)
+- Whales $10M+: Whale Alert API key optional (agar ho to)
 - Volume momentum: BTC/ETH/SOL me 8%+ 24h move
+
+Honest note: ye sampled coverage hai (free tier ki majboori). Har ek
+transfer pakadne ke liye paid API chahiye hoti hai — lekin bade moves
+aksar pakde jayenge.
 
 ## Tarika: Render Free Web Service + UptimeRobot
 
@@ -35,6 +42,8 @@ Free service 15 min idle ke baad so jati hai, isliye UptimeRobot (free, 50 monit
 6. Environment Variables me dalo:
    - `TELEGRAM_BOT_TOKEN` = BotFather wala token
    - `TELEGRAM_CHAT_ID` = tumhara chat ID
+   - `ETHERSCAN_API_KEY` = etherscan.io se free key (card nahi mangta) —
+     isse ETH whale scan chalta hai
    - `WHALE_ALERT_API_KEY` = optional
    - `POLL_INTERVAL_SEC` = 600
 7. Deploy dabao. URL milega jaise:

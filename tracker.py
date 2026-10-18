@@ -3,7 +3,8 @@
 No fixed price targets. Sends crisp alerts for:
 - War / geopolitical news (bearish for crypto)
 - Macro: DXY up, US10Y yields up, Crude Oil spike (bearish)
-- Whales: large exchange flows, whale wallet movements (via Whale Alert if key provided)
+- Whales: $1M+ transfers on ETH (Etherscan, free key) and BTC (blockchain.info, no key);
+  optional Whale Alert API ($10M+) if key provided
 - Spot: unusual volume spikes on BTC/ETH/SOL
 
 Env vars required:
@@ -11,7 +12,17 @@ Env vars required:
   TELEGRAM_CHAT_ID   - your chat id (get via @userinfobot)
 Optional:
   WHALE_ALERT_API_KEY - free tier from whale-alert.io
+  ETHERSCAN_API_KEY   - free key from etherscan.io (no card needed), enables ETH whale scan
   POLL_INTERVAL_SEC   - default 600 (10 min)
+
+Whale scan notes (free-tier honest design):
+  - ETH: latest block scanned every poll via Etherscan (small blocks, cheap).
+    Sampled coverage - ETH makes a block every ~12s, so this catches whales
+    landing in the sampled blocks, not every single transfer.
+  - BTC: latest block scanned every ~3 hours via blockchain.info rawblock
+    (blocks are ~8MB, so less frequent to respect free bandwidth limits).
+  - Full real-time coverage of every transfer needs a paid API - this is the
+    best free-tier setup.
 """
 
 import os
@@ -25,7 +36,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 WHALE_KEY = os.getenv("WHALE_ALERT_API_KEY", "")
+ETHERSCAN_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SEC", "600"))
+
+WHALE_USD_THRESHOLD = 1_000_000  # $1M+ transfers count as whale moves
 
 STATE_FILE = "/tmp/tracker_state.json"
 
@@ -160,9 +174,78 @@ def check_whales(state):
         print(f"[WHALE ERROR] {e}")
     return alerts
 
-def check_volume_spike(state):
+def check_eth_whales(state, eth_price):
+    """Scan latest ETH block for $1M+ transfers. Etherscan free key, no card."""
     alerts = []
-    data = get_coingecko()
+    if not ETHERSCAN_KEY or not eth_price:
+        return alerts
+    try:
+        url = "https://api.etherscan.io/api"
+        params = {"module": "proxy", "action": "eth_getBlockByNumber",
+                  "tag": "latest", "boolean": "true", "apikey": ETHERSCAN_KEY}
+        r = requests.get(url, params=params, timeout=30)
+        block = r.json().get("result")
+        if not isinstance(block, dict):
+            return alerts  # e.g. Etherscan error string like "Invalid API Key"
+        bnum = block.get("number", "")
+        if not bnum or state.get("eth_last_block") == bnum:
+            return alerts  # already scanned this block
+        state["eth_last_block"] = bnum
+        for tx in block.get("transactions", []):
+            try:
+                val_eth = int(tx.get("value", "0x0"), 16) / 1e18
+            except (ValueError, TypeError):
+                continue
+            usd = val_eth * eth_price
+            if usd >= WHALE_USD_THRESHOLD:
+                h = tx.get("hash", "")
+                if h and can_alert(state, f"ethw_{h}", 86400):
+                    frm = (tx.get("from") or "?")[:12]
+                    to = (tx.get("to") or "contract")[:12]
+                    alerts.append(
+                        f"🐋 *ETH Whale:* {val_eth:,.0f} ETH (${usd:,.0f})\n`{frm}...` → `{to}...`")
+    except Exception as e:
+        print(f"[ETH WHALE ERROR] {e}")
+    return alerts
+
+
+def check_btc_whales(state, btc_price):
+    """Scan latest BTC block for $1M+ transfers. blockchain.info, no key needed."""
+    alerts = []
+    if not btc_price:
+        return alerts
+    try:
+        tip = requests.get("https://blockchain.info/latestblock", timeout=15).json()
+        h = tip.get("hash", "")
+        if not h or state.get("btc_last_block") == h:
+            return alerts  # already scanned this block
+        block = None
+        for _ in range(2):  # retry once on transient failure
+            r = requests.get(f"https://blockchain.info/rawblock/{h}?format=json", timeout=60)
+            j = r.json()
+            if isinstance(j, dict) and "tx" in j:
+                block = j
+                break
+            time.sleep(5)
+        if not block:
+            print("[BTC WHALE] rawblock fetch failed, will retry next run")
+            return alerts
+        state["btc_last_block"] = h  # mark scanned only after successful fetch
+        for tx in block.get("tx", []):
+            total_sat = sum(o.get("value", 0) for o in tx.get("out", []))
+            usd = total_sat / 1e8 * btc_price
+            if usd >= WHALE_USD_THRESHOLD:
+                th = tx.get("hash", "")
+                if th and can_alert(state, f"btcw_{th}", 86400):
+                    btc_amt = total_sat / 1e8
+                    alerts.append(f"🐋 *BTC Whale:* {btc_amt:,.1f} BTC (${usd:,.0f})")
+    except Exception as e:
+        print(f"[BTC WHALE ERROR] {e}")
+    return alerts
+
+
+def check_volume_spike(state, data):
+    alerts = []
     for coin in COINS:
         info = data.get(coin, {})
         chg = info.get("usd_24h_change", 0)
@@ -207,13 +290,23 @@ def main_loop():
     print(f"[START] Tracker running, poll every {POLL_INTERVAL}s")
     send_telegram("✅ *Tracker Online*\nMacro + Whale alerts 24/7 shuru. No fixed price targets, sirf smart alerts.")
     state = load_state()
+    poll_count = state.get("poll_count", 0)
     while True:
         try:
+            poll_count += 1
+            state["poll_count"] = poll_count
             alerts = []
+            prices = get_coingecko()  # fetched once per loop, shared by checks
+            eth_price = prices.get("ethereum", {}).get("usd", 0)
+            btc_price = prices.get("bitcoin", {}).get("usd", 0)
+
             alerts += check_macro(state)
             alerts += check_war_news(state)
             alerts += check_whales(state)
-            alerts += check_volume_spike(state)
+            alerts += check_volume_spike(state, prices)
+            alerts += check_eth_whales(state, eth_price)      # every poll (~10 min)
+            if poll_count % 18 == 1:                           # every ~3 hours
+                alerts += check_btc_whales(state, btc_price)   # BTC blocks are ~8MB
 
             for a in alerts:
                 send_telegram(a)
