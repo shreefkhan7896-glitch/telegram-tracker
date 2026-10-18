@@ -6,6 +6,14 @@ No fixed price targets. Sends crisp alerts for:
 - Whales: $1M+ transfers on ETH (Etherscan, free key) and BTC (blockchain.info, no key);
   optional Whale Alert API ($10M+) if key provided
 - Spot: unusual volume spikes on BTC/ETH/SOL
+- Futures (100% free, no keys):
+  - Liquidations: Binance first (biggest volume), auto-fallback to OKX if geo-blocked
+  - Funding extremes: Binance first, Hyperliquid fallback (crowded longs/shorts)
+  - Liquidity: order-book bid/ask imbalance + Open Interest changes via Hyperliquid
+  - NOTE: Binance/Bybit geo-block US IPs (regulatory). No proxy jugaad - evading it
+    violates their ToS and risks IP bans. Code tries Binance directly, accepts the
+    block, falls back to OKX/Hyperliquid gracefully. Non-US server par Binance
+    data automatically flow hoga.
 
 Env vars required:
   TELEGRAM_BOT_TOKEN - from BotFather
@@ -40,6 +48,42 @@ ETHERSCAN_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SEC", "600"))
 
 WHALE_USD_THRESHOLD = 1_000_000  # $1M+ transfers count as whale moves
+
+# --- Futures data: 100% free, no API keys ---
+# Exchange priority: Binance first (biggest volume), automatic fallback to
+# OKX (liquidations) + Hyperliquid (funding/book/OI) if geo-blocked.
+# NOTE: Binance/Bybit geo-block US IPs (regulatory). No proxy/VPN jugaad -
+# evading that violates their ToS and risks IP bans. The code tries Binance
+# directly and accepts the block, falling back gracefully. If the bot ever
+# runs from a non-restricted region, Binance data flows automatically.
+BINANCE_FAPI = "https://fapi.binance.com"
+HL_API = "https://api.hyperliquid.xyz"
+OKX_API = "https://www.okx.com"
+FUT_SYMBOLS = [("BTC", "BTC-USDT", "BTC-USDT-SWAP"),
+               ("ETH", "ETH-USDT", "ETH-USDT-SWAP"),
+               ("SOL", "SOL-USDT", "SOL-USDT-SWAP")]
+LIQ_MEGA_USD = 1_000_000    # single liquidation alert threshold
+LIQ_CASCADE_USD = 2_000_000  # per-poll cascade alert threshold
+
+_binance_blocked = None  # cached per process: True once geo-block confirmed
+
+
+def binance_get(path, params=None):
+    """Binance public API, no key. Returns None on geo-block/error (no evasion)."""
+    global _binance_blocked
+    if _binance_blocked:
+        return None
+    try:
+        r = requests.get(BINANCE_FAPI + path, params=params or {}, timeout=12)
+        j = r.json()
+        if isinstance(j, dict) and "restricted location" in j.get("msg", ""):
+            _binance_blocked = True
+            print("[BINANCE] geo-blocked from this server, using OKX/Hyperliquid")
+            return None
+        return j
+    except Exception as e:
+        print(f"[BINANCE ERROR {path}] {e}")
+        return None
 
 STATE_FILE = "/tmp/tracker_state.json"
 
@@ -257,6 +301,204 @@ def check_volume_spike(state, data):
                 alerts.append(f"📊 *{coin.upper()} Momentum:* {chg:+.1f}% in 24h — bada move, whales/exchange flow check karo.")
     return alerts
 
+
+def hl_post(payload):
+    try:
+        r = requests.post(HL_API + "/info", json=payload, timeout=20)
+        return r.json()
+    except Exception as e:
+        print(f"[HL ERROR] {e}")
+        return None
+
+
+def get_hl_ctx():
+    """Hyperliquid perps: {coin: {funding (per hour), oi_usd, mid}} for BTC/ETH/SOL."""
+    d = hl_post({"type": "metaAndAssetCtxs"})
+    if not d or not isinstance(d, list) or len(d) < 2:
+        return {}
+    meta, ctxs = d[0], d[1]
+    out = {}
+    for m, c in zip(meta.get("universe", []), ctxs):
+        name = m.get("name")
+        if name in ("BTC", "ETH", "SOL"):
+            try:
+                mid = float(c.get("midPx") or 0)
+                oi_usd = float(c.get("openInterest") or 0) * mid
+                out[name] = {"funding": float(c.get("funding") or 0),
+                             "oi_usd": oi_usd, "mid": mid}
+            except (ValueError, TypeError):
+                continue
+    return out
+
+
+def get_okx_ctval(uly, state):
+    """Contract value for OKX SWAP (cached in state)."""
+    key = f"ctval_{uly}"
+    if state.get(key):
+        return state[key]
+    try:
+        r = requests.get(OKX_API + "/api/v5/public/instruments",
+                         params={"instType": "SWAP", "uly": uly}, timeout=15).json()
+        data = r.get("data", [])
+        if data:
+            v = float(data[0].get("ctVal", 0))
+            if v:
+                state[key] = v
+                return v
+    except Exception as e:
+        print(f"[OKX CTVAL ERROR {uly}] {e}")
+    return 0
+
+
+def fetch_liquidations(coin, uly, mid, state):
+    """Unified liquidation feed: (ts_ms, usd, posSide, venue, uid).
+    Tries Binance first (biggest volume); falls back to OKX if geo-blocked."""
+    sym = coin + "USDT"
+    bj = binance_get("/fapi/v1/allForceOrders", {"symbol": sym, "limit": 100})
+    if isinstance(bj, list):
+        out = []
+        for o in bj:
+            try:
+                usd = float(o.get("origQty") or 0) * float(o.get("price") or 0)
+                ts = int(o.get("time") or 0)
+            except (ValueError, TypeError):
+                continue
+            if ts and usd > 0:
+                # Binance force-order side SELL = long liquidated, BUY = short liquidated
+                pos = "long" if o.get("side") == "SELL" else "short"
+                out.append((ts, usd, pos, "Binance", f"bn_{o.get('orderId')}"))
+        if out:
+            return out
+    # OKX fallback (public API, no key, not geo-blocked)
+    ctval = get_okx_ctval(uly, state)
+    if not ctval or not mid:
+        return []
+    try:
+        r = requests.get(OKX_API + "/api/v5/public/liquidation-orders",
+                         params={"instType": "SWAP", "uly": uly, "state": "filled"},
+                         timeout=20).json()
+    except Exception as e:
+        print(f"[OKX LIQ ERROR {uly}] {e}")
+        return []
+    out = []
+    for row in r.get("data", []):
+        for d in row.get("details", []):
+            try:
+                ts = int(d.get("ts") or 0)
+                usd = float(d.get("sz") or 0) * ctval * mid
+            except (ValueError, TypeError):
+                continue
+            if ts and usd > 0:
+                out.append((ts, usd, d.get("posSide") or "unknown", "OKX",
+                            f"ok_{ts}_{d.get('sz')}"))
+    return out
+
+
+def check_liquidations(state, hl_ctx):
+    """Liquidation cascades + mega liquidations. Binance first, OKX fallback."""
+    alerts = []
+    now_ms = int(time.time() * 1000)
+    for coin, uly, instId in FUT_SYMBOLS:
+        mid = (hl_ctx.get(coin) or {}).get("mid", 0)
+        items = fetch_liquidations(coin, uly, mid, state)
+        last_key = f"liq_last_{coin}"
+        last_ts = state.get(last_key, 0)
+        if not last_ts:
+            state[last_key] = now_ms  # first run: baseline, skip backlog
+            continue
+        new = [(ts, usd, pos, venue, uid) for (ts, usd, pos, venue, uid) in items
+               if ts > last_ts]
+        if new:
+            state[last_key] = max(ts for ts, _, _, _, _ in new)
+        long_usd = short_usd = 0.0
+        venue = new[0][3] if new else ""
+        for ts, usd, pos, venue, uid in new:
+            if pos == "long":
+                long_usd += usd
+            else:
+                short_usd += usd
+            if usd >= LIQ_MEGA_USD and can_alert(state, f"liqm_{uid}", 86400):
+                side_txt = "LONG rekt 🔻" if pos == "long" else "SHORT rekt 🔺"
+                alerts.append(f"💥 *Mega Liquidation ({coin}):* ${usd:,.0f} {side_txt} on {venue}")
+        total = long_usd + short_usd
+        if total >= LIQ_CASCADE_USD and can_alert(
+                state, f"liqc_{coin}_{now_ms // 3600000}", 3600):
+            alerts.append(
+                f"🔥 *Liquidation Cascade ({coin}):* ${total:,.0f} liquidated on {venue} "
+                f"(last ~10 min) — Longs ${long_usd:,.0f} / Shorts ${short_usd:,.0f}")
+    return alerts
+
+
+def fetch_funding_hourly(coin, hl_ctx):
+    """Hourly funding rate (decimal) + venue. Binance first, Hyperliquid fallback."""
+    bj = binance_get("/fapi/v1/premiumIndex", {"symbol": coin + "USDT"})
+    if isinstance(bj, dict) and bj.get("lastFundingRate") is not None:
+        try:
+            return float(bj["lastFundingRate"]) / 8.0, "Binance"  # 8h -> hourly
+        except (ValueError, TypeError):
+            pass
+    c = hl_ctx.get(coin) or {}
+    if c.get("funding") is not None:
+        return c["funding"], "Hyperliquid"
+    return None, ""
+
+
+def check_funding(state, hl_ctx):
+    """Funding extremes: crowded longs = contrarian bearish, crowded shorts = bullish."""
+    alerts = []
+    for coin, _, _ in FUT_SYMBOLS:
+        fr, venue = fetch_funding_hourly(coin, hl_ctx)
+        if fr is None:
+            continue
+        if abs(fr) >= 0.0001:  # >= 0.01%/h ≈ 87% APR, genuinely extreme
+            bucket = "pos" if fr > 0 else "neg"
+            if can_alert(state, f"fund_{coin}_{bucket}", 21600):
+                apr = fr * 24 * 365 * 100
+                crowd = ("longs crowded (contrarian bearish 📉)"
+                         if fr > 0 else "shorts crowded (contrarian bullish 📈)")
+                alerts.append(f"💰 *Funding Extreme ({coin}):* {fr*100:+.4f}%/h "
+                              f"(~{apr:+.0f}% APR) on {venue} — {crowd}")
+    return alerts
+
+
+def check_liquidity_hl(state, hl_ctx):
+    """Hyperliquid: order-book bid/ask imbalance + Open Interest changes."""
+    alerts = []
+    for coin, _, _ in FUT_SYMBOLS:
+        c = hl_ctx.get(coin)
+        if not c:
+            continue
+        book = hl_post({"type": "l2Book", "coin": coin})
+        if isinstance(book, dict) and "levels" in book:
+            try:
+                bids, asks = book["levels"][0], book["levels"][1]
+                bv = sum(float(l["px"]) * float(l["sz"]) for l in bids[:20])
+                av = sum(float(l["px"]) * float(l["sz"]) for l in asks[:20])
+            except (ValueError, TypeError, KeyError):
+                bv = av = 0
+            if bv + av > 0:
+                imb = (bv - av) / (bv + av)
+                if abs(imb) > 0.3 and can_alert(
+                        state, f"book_{coin}_{'bid' if imb > 0 else 'ask'}", 7200):
+                    side = "BID-heavy 🟢 (buy wall)" if imb > 0 else "ASK-heavy 🔴 (sell wall)"
+                    alerts.append(f"📚 *Book Imbalance ({coin}):* {side} — "
+                                  f"bids {bv/(bv+av):.0%} vs asks {av/(bv+av):.0%}")
+        oi = c["oi_usd"]
+        prev = state.get(f"oi_{coin}", 0)
+        if prev and oi:
+            chg = (oi - prev) / prev
+            if abs(chg) > 0.08 and can_alert(state, f"oichg_{coin}", 14400):
+                if chg > 0:
+                    alerts.append(f"📈 *Open Interest ({coin}):* UP {chg:.0%} → "
+                                  f"${oi/1e9:.2f}B (leverage building)")
+                else:
+                    alerts.append(f"📉 *Open Interest ({coin}):* DOWN {abs(chg):.0%} → "
+                                  f"${oi/1e9:.2f}B (deleverage)")
+        if oi:
+            state[f"oi_{coin}"] = oi
+    return alerts
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     # Render Free Web Service + UptimeRobot keep-alive endpoint
     def do_GET(self):
@@ -288,7 +530,7 @@ def start_health_server():
 def main_loop():
     start_health_server()  # keep Render free service awake via UptimeRobot pings
     print(f"[START] Tracker running, poll every {POLL_INTERVAL}s")
-    send_telegram("✅ *Tracker Online*\nMacro + Whale alerts 24/7 shuru. No fixed price targets, sirf smart alerts.")
+    send_telegram("✅ *Tracker Online*\nMacro + Whale + Futures (liq/funding/liquidity) alerts 24/7 shuru.")
     state = load_state()
     poll_count = state.get("poll_count", 0)
     while True:
@@ -299,12 +541,16 @@ def main_loop():
             prices = get_coingecko()  # fetched once per loop, shared by checks
             eth_price = prices.get("ethereum", {}).get("usd", 0)
             btc_price = prices.get("bitcoin", {}).get("usd", 0)
+            hl_ctx = get_hl_ctx()     # Hyperliquid futures data, shared by checks
 
             alerts += check_macro(state)
             alerts += check_war_news(state)
             alerts += check_whales(state)
             alerts += check_volume_spike(state, prices)
             alerts += check_eth_whales(state, eth_price)      # every poll (~10 min)
+            alerts += check_liquidations(state, hl_ctx)       # every poll
+            alerts += check_funding(state, hl_ctx)             # every poll
+            alerts += check_liquidity_hl(state, hl_ctx)        # every poll
             if poll_count % 18 == 1:                           # every ~3 hours
                 alerts += check_btc_whales(state, btc_price)   # BTC blocks are ~8MB
 

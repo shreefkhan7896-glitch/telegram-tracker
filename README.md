@@ -10,6 +10,19 @@ No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
   hote hain, isliye free bandwidth limit ke hisaab se kam frequent)
 - Whales $10M+: Whale Alert API key optional (agar ho to)
 - Volume momentum: BTC/ETH/SOL me 8%+ 24h move
+- **Futures (100% free, koi key nahi chahiye):**
+  - Liquidation cascade: $2M+ liquidations (10 min me), long/short split ke saath —
+    **Binance se pehle try** (sabse zyada volume), geo-block hua to OKX fallback
+  - Mega liquidation: koi single $1M+ liquidation turant alert
+  - Funding extreme: ±0.01%/h se zyada ho to alert — Binance first, Hyperliquid fallback
+    (crowded longs = contrarian bearish, crowded shorts = contrarian bullish)
+  - Book imbalance: bid/ask liquidity 65/35 se zyada tilted ho to alert (Hyperliquid)
+  - Open Interest: 8%+ change par alert (leverage build-up ya deleverage)
+
+Note: Binance/Bybit US IPs ko regulatory wajah se geo-block karte hain.
+Proxy/VPN se ye block todna unke ToS ke khilaaf hai (ban ka risk), isliye
+code Binance ko seedha try karta hai — jahan chalega wahan Binance ka data,
+block hua to khud OKX/Hyperliquid par switch. Koi jugaad nahi, sab legit.
 
 Honest note: ye sampled coverage hai (free tier ki majboori). Har ek
 transfer pakadne ke liye paid API chahiye hoti hai — lekin bade moves
