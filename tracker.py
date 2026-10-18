@@ -17,8 +17,10 @@ Optional:
 import os
 import time
 import json
+import threading
 import requests
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -172,7 +174,36 @@ def check_volume_spike(state):
                 alerts.append(f"📊 *{coin.upper()} Momentum:* {chg:+.1f}% in 24h — bada move, whales/exchange flow check karo.")
     return alerts
 
+class HealthHandler(BaseHTTPRequestHandler):
+    # Render Free Web Service + UptimeRobot keep-alive endpoint
+    def do_GET(self):
+        if self.path in ("/", "/health"):
+            body = b"OK - tracker alive"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *args):
+        pass  # keep logs clean
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", "10000"))  # Render sets PORT automatically
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f"[HEALTH] listening on port {port}")
+    except Exception as e:
+        print(f"[HEALTH ERROR] {e}")
+
+
 def main_loop():
+    start_health_server()  # keep Render free service awake via UptimeRobot pings
     print(f"[START] Tracker running, poll every {POLL_INTERVAL}s")
     send_telegram("✅ *Tracker Online*\nMacro + Whale alerts 24/7 shuru. No fixed price targets, sirf smart alerts.")
     state = load_state()

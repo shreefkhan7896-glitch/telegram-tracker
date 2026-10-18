@@ -1,9 +1,11 @@
 services:
-  - type: worker
+  - type: web
     name: crypto-macro-whale-tracker
     env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python tracker.py
+    healthCheckPath: /health
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false

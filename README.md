@@ -1,6 +1,6 @@
-# 24/7 Macro + Whale Telegram Tracker
+# 24/7 Macro + Whale Telegram Tracker (100% FREE)
 
-No fixed price targets. Sirf smart alerts.
+No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
 
 ## Kya track karta hai
 - War / geopolitical news (GDELT free API)
@@ -8,29 +8,46 @@ No fixed price targets. Sirf smart alerts.
 - Whales: $10M+ moves (Whale Alert API key optional)
 - Volume momentum: BTC/ETH/SOL me 8%+ 24h move
 
-## 1. Telegram Bot banao
+## Tarika: Render Free Web Service + UptimeRobot
+
+Render ka free tier bina credit card ke hai (750 free hours/month = 24/7 ke liye kaafi).
+Free service 15 min idle ke baad so jati hai, isliye UptimeRobot (free, 50 monitors,
+5-min interval, no card) har 5 min par /health ko ping karke jagaye rakhta hai.
+
+### 1. Telegram Bot banao
 1. Telegram me @BotFather ko open karo
-2. `/newbot` bhejo, naam do (jaise `MacroWhaleTrackerBot`)
-3. BotFather tumhe `BOT_TOKEN` dega, usko safe rakho
-4. Apne bot ko Telegram me open karke `/start` dabao
-5. @userinfobot ko open karke apna `CHAT_ID` le lo
+2. `/newbot` bhejo, naam do
+3. BotFather se `BOT_TOKEN` lo (kisi ko mat bhejo, seedha Render me dalna)
+4. Apne bot ko open karke `/start` dabao
+5. @userinfobot se apna `CHAT_ID` lo
 
-## 2. Free cloud par host karo (Render)
-1. Ye folder ko GitHub par push karo
-2. render.com par jao → New → Background Worker
-3. GitHub repo connect karo
-4. Build: `pip install -r requirements.txt`
-5. Start: `python tracker.py`
-6. Env vars me dalo:
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_CHAT_ID`
-   - `WHALE_ALERT_API_KEY` (optional, whale-alert.io se free)
+### 2. GitHub repo banao
+1. GitHub.com → New repository → naam `telegram-tracker`, Public
+2. Is folder ki 5 files upload karo: tracker.py, requirements.txt,
+   render.yaml, README.md (Procfile ki zaroorat nahi)
+
+### 3. Render par deploy karo (FREE plan dhyaan se)
+1. Render.com → Sign up (GitHub se, card nahi mangta)
+2. New → Web Service → apna `telegram-tracker` repo select karo
+3. **Instance Type: Free chuno (Starter $7 nahi!)**
+4. Build Command: `pip install -r requirements.txt`
+5. Start Command: `python tracker.py`
+6. Environment Variables me dalo:
+   - `TELEGRAM_BOT_TOKEN` = BotFather wala token
+   - `TELEGRAM_CHAT_ID` = tumhara chat ID
+   - `WHALE_ALERT_API_KEY` = optional
    - `POLL_INTERVAL_SEC` = 600
+7. Deploy dabao. URL milega jaise:
+   `https://crypto-macro-whale-tracker.onrender.com`
+8. Browser me `https://tumhara-url.onrender.com/health` kholo,
+   "OK - tracker alive" dikhna chahiye. Telegram par "Tracker Online" ayega.
 
-## 3. Railway (alternative)
-1. railway.app → New Project → Deploy from GitHub
-2. Same env vars dalo
-3. Start command: `python tracker.py`
+### 4. UptimeRobot lagao (taaki 24/7 na soye)
+1. UptimeRobot.com → free account banao (card nahi mangta)
+2. Add New Monitor → Monitor Type: HTTP(s)
+3. URL: `https://tumhara-url.onrender.com/health`
+4. Interval: 5 minutes → Create
+5. Bas! Ab Render ki service kabhi nahi soyegi.
 
 ## Test
-Bot online hote hi tumhe Telegram par "Tracker Online" message ayega.
+Deploy hote hi Telegram par "✅ Tracker Online" message ayega.
