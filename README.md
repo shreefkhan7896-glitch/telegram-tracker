@@ -37,6 +37,11 @@ No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
   (Binance/Bybit US se geo-blocked, isliye nahi — dono top-tier volume wale hain)
 - **Sentiment & positioning:** Fear & Greed extremes (contrarian alerts), BTC dominance
   trend (alt pressure vs alt-friendly), Deribit BTC/ETH options put/call OI ratio + max pain
+- **Macro intelligence v2 (v8.2):** FRED official data — CPI, Core CPI, PPI, unemployment,
+  payrolls (free key, no card — `FRED_API_KEY` env var). Naya print release hote hi bot
+  khud detect karke ek line me crypto verdict bhejta hai: **Bullish 🟢 / Bearish 🔴 /
+  Neutral ⚪**. DeFiLlama stablecoin supply flows (7d me ±$3B = liquidity in/out signal).
+  Polymarket ke agle-FOMC rate-cut odds + 10pp+ shifts par alert
 - **L1/L2 Pump Radar:** SOL/AVAX/NEAR/SUI/APT/SEI/INJ/ATOM/ARB/OP/DOT/POL ka OKX 1H
   volume anomaly scan (har ~30 min) — 3x+ volume + shant price = "Volume Building"
   early warning; 3x+ volume + price up = "Pump Alert". HL perps par deeply negative

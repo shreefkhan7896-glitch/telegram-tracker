@@ -13,5 +13,7 @@ services:
         sync: false
       - key: WHALE_ALERT_API_KEY
         sync: false
+      - key: FRED_API_KEY
+        sync: false
       - key: POLL_INTERVAL_SEC
         value: 600

@@ -38,6 +38,10 @@ No fixed price targets. Sends crisp alerts for:
   plus digest every PULSE_DIGEST_HOURS (default 6, 0 = off). Data: OKX + Hyperliquid.
 - Sentiment & positioning: Fear & Greed extremes (contrarian), BTC dominance trend
   (alt pressure vs alt-friendly), Deribit BTC/ETH options put/call OI ratio + max pain.
+- Macro intelligence v2: FRED official data (CPI, Core CPI, PPI, unemployment, payrolls —
+  free key, no card) — naya print aate hi auto-detect aur ek line me crypto verdict
+  (Bullish 🟢 / Bearish 🔴 / Neutral ⚪); DeFiLlama stablecoin supply flows (liquidity
+  in/out); Polymarket ke agle-FOMC rate odds + bade shifts par alert.
   - NOTE: Binance/Bybit geo-block US IPs (regulatory). No proxy jugaad - evading it
     violates their ToS and risks IP bans. Code tries Binance directly, accepts the
     block, falls back to OKX/Hyperliquid gracefully. Non-US server par Binance
@@ -1183,6 +1187,193 @@ def check_deribit_options(state):
     return alerts
 
 
+# ============ v8.2: FRED macro releases + DeFiLlama stables + Polymarket Fed odds ============
+# FRED_API_KEY: fred.stlouisfed.org par free me banta hai (sirf email, NO card).
+# Render env vars me FRED_API_KEY dalo. Key na ho to ye checks silently skip.
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+FRED_SERIES = {
+    "CPIAUCSL": ("CPI (headline)", "inflation"),
+    "CPILFESL": ("Core CPI", "inflation"),
+    "PPIFIS": ("PPI final demand", "inflation"),
+    "UNRATE": ("Unemployment rate", "jobs"),
+    "PAYEMS": ("Nonfarm payrolls", "jobs"),
+}
+
+
+def fred_observations(series_id, limit=14):
+    """FRED series observations, newest-first [(date, value)]. [] if no key/failure."""
+    if not FRED_API_KEY:
+        return []
+    try:
+        r = requests.get("https://api.stlouisfed.org/fred/series/observations",
+                         params={"series_id": series_id, "api_key": FRED_API_KEY,
+                                 "file_type": "json", "sort_order": "desc",
+                                 "limit": str(limit)}, timeout=20).json()
+        obs = [(o["date"], o["value"]) for o in r.get("observations", [])
+               if o.get("value") not in (None, ".", "")]
+        return [(d, float(v)) for d, v in obs]
+    except Exception as e:
+        print(f"[FRED ERROR {series_id}] {e}")
+        return []
+
+
+def fred_verdict(kind, name, obs):
+    """Naye macro print ka crypto verdict. obs: newest-first [(date, value)]."""
+    if len(obs) < 3:
+        return None
+    (d0, v0), (d1, v1), (d2, v2) = obs[0], obs[1], obs[2]
+    if kind == "inflation":
+        mom = (v0 / v1 - 1) * 100
+        prev_mom = (v1 / v2 - 1) * 100
+        yoy = (v0 / obs[12][1] - 1) * 100 if len(obs) > 12 else None
+        yoy_txt = f", YoY {yoy:.1f}%" if yoy is not None else ""
+        if mom > prev_mom + 0.05:
+            return (f"*{name}:* MoM {mom:.2f}% (pichhle mahine {prev_mom:.2f}%){yoy_txt} — "
+                    f"inflation tez ho rahi hai → crypto ke liye *Bearish* 🔴 (Fed hawkish rahega)")
+        elif mom < prev_mom - 0.05:
+            return (f"*{name}:* MoM {mom:.2f}% (pichhle mahine {prev_mom:.2f}%){yoy_txt} — "
+                    f"inflation thandi ho rahi hai → crypto ke liye *Bullish* 🟢 (rate-cut ki ummeed)")
+        else:
+            return (f"*{name}:* MoM {mom:.2f}% (pichhle mahine {prev_mom:.2f}%){yoy_txt} — "
+                    f"koi khaas change nahi → *Neutral* ⚪")
+    elif kind == "jobs":
+        if name.startswith("Unemployment"):
+            chg = v0 - v1  # percentage points
+            if chg >= 0.4:
+                return (f"*Unemployment {v0:.1f}%* ({chg:+.1f}pp) — tez jump, recession ka khatra → "
+                        f"crypto ke liye *Bearish* 🔴")
+            elif chg >= 0.1:
+                return (f"*Unemployment {v0:.1f}%* ({chg:+.1f}pp) — labor market soft, Fed dovish ho sakta hai → "
+                        f"crypto ke liye *Bullish* 🟢")
+            elif chg <= -0.1:
+                return (f"*Unemployment {v0:.1f}%* ({chg:+.1f}pp) — labor strong, Fed hawkish rahega → "
+                        f"crypto ke liye *Bearish* 🔴")
+            else:
+                return f"*Unemployment {v0:.1f}%* (stable) → *Neutral* ⚪"
+        else:  # PAYEMS, thousands of jobs
+            chg = v0 - v1
+            prev_chg = v1 - v2
+            if chg < prev_chg - 50:
+                return (f"*Payrolls {chg:+.0f}K* (pichhle mahine {prev_chg:+.0f}K) — jobs weak pad rahe hain, "
+                        f"rate-cut odds badhengi → crypto ke liye *Bullish* 🟢")
+            elif chg > prev_chg + 50:
+                return (f"*Payrolls {chg:+.0f}K* (pichhle mahine {prev_chg:+.0f}K) — jobs strong, "
+                        f"Fed hawkish rahega → crypto ke liye *Bearish* 🔴")
+            else:
+                return f"*Payrolls {chg:+.0f}K* (stable trend) → *Neutral* ⚪"
+    return None
+
+
+def check_fred_releases(state):
+    """FRED: CPI/PPI/jobs ka naya print aate hi detect → bullish/bearish verdict ke saath alert."""
+    alerts = []
+    if not FRED_API_KEY:
+        return alerts
+    seen = state.get("fred_seen", {})
+    for sid, (name, kind) in FRED_SERIES.items():
+        obs = fred_observations(sid)
+        if not obs:
+            continue
+        d0 = obs[0][0]
+        if seen.get(sid) is None:
+            seen[sid] = d0  # first run: baseline, backlog spam nahi
+            continue
+        if seen.get(sid) == d0:
+            continue
+        seen[sid] = d0
+        txt = fred_verdict(kind, name, obs)
+        if txt:
+            poly = ""
+            if state.get("poly_cut_pct") is not None:
+                poly = f" (Polymarket: agle FOMC me cut ke {state['poly_cut_pct']:.0f}% odds)"
+            alerts.append(f"🏛️ *Macro Release — {name}* ({d0[:7]}){poly}\n{txt}")
+    state["fred_seen"] = seen
+    return alerts
+
+
+def check_stablecoin_flows(state):
+    """DeFiLlama: total stablecoin supply ka 7d change — crypto me liquidity aa/ja rahi hai. Free, no key."""
+    alerts = []
+    try:
+        r = requests.get("https://stablecoins.llama.fi/stablecoins", timeout=20).json()
+        assets = r.get("peggedAssets", [])
+        total = sum(float(a.get("circulating", {}).get("peggedUSD", 0) or 0) for a in assets)
+        prev = sum(float(a.get("circulatingPrevWeek", {}).get("peggedUSD", 0) or 0) for a in assets)
+        if total <= 0 or prev <= 0:
+            return alerts
+        chg = total - prev
+        state["stable_mcap"] = total
+        if abs(chg) >= 3e9 and can_alert(state, "stable_flow", 172800):
+            if chg > 0:
+                alerts.append(f"💵 *Stablecoin Liquidity:* supply 7d me +${chg/1e9:.1f}B "
+                              f"(total ${total/1e9:.0f}B) — fresh paisa crypto me aa raha hai → *Bullish* 🟢")
+            else:
+                alerts.append(f"💵 *Stablecoin Liquidity:* supply 7d me ${chg/1e9:.1f}B "
+                              f"(total ${total/1e9:.0f}B) — liquidity bahar nikal rahi hai → *Bearish* 🔴")
+    except Exception as e:
+        print(f"[STABLE ERROR] {e}")
+    return alerts
+
+
+def get_polymarket_fed_odds():
+    """Agle FOMC rate decision ke Polymarket odds. Dict ya None. Free, no key."""
+    try:
+        r = requests.get("https://gamma-api.polymarket.com/public-search",
+                         params={"q": "Fed decision"}, timeout=20).json()
+        evs = r if isinstance(r, list) else r.get("events", [])
+        today = datetime.now(timezone.utc).date().isoformat()
+        best = None
+        for e in evs:
+            title = (e.get("title") or "").lower()
+            if "dissent" in title or "how many" in title:
+                continue
+            if "fed" not in title or "decision" not in title:
+                continue
+            end = (e.get("endDate") or "")[:10]
+            if not end or end < today:
+                continue
+            if best is None or end < best[0]:
+                best = (end, e)
+        if not best:
+            return None
+        end, e = best
+        odds = {"cut50": 0.0, "cut25": 0.0, "hold": 0.0, "hike": 0.0, "end": end}
+        for m in e.get("markets", []):
+            q = (m.get("question") or "").lower()
+            try:
+                px = float(json.loads(m.get("outcomePrices", "[0,0]"))[0])
+            except (ValueError, TypeError):
+                continue
+            if "50" in q and ("decrease" in q or "cut" in q):
+                odds["cut50"] = px
+            elif "25" in q and ("decrease" in q or "cut" in q):
+                odds["cut25"] = px
+            elif "no change" in q or "unchanged" in q:
+                odds["hold"] = px
+            elif "increase" in q or "hike" in q or "raise" in q:
+                odds["hike"] = px
+        return odds
+    except Exception as e:
+        print(f"[POLY ERROR] {e}")
+        return None
+
+
+def check_polymarket_fed(state):
+    """Polymarket: agle FOMC ke rate-cut odds me bada shift → alert."""
+    alerts = []
+    o = get_polymarket_fed_odds()
+    if not o:
+        return alerts
+    cut = (o["cut25"] + o["cut50"]) * 100
+    prev = state.get("poly_cut_pct")
+    state["poly_cut_pct"] = cut
+    if prev is not None and abs(cut - prev) >= 10 and can_alert(state, "poly_shift", 86400):
+        d = "cut odds badh rahe — dovish shift 🟢" if cut > prev else "cut odds gir rahe — hawkish shift 🔴"
+        alerts.append(f"🎲 *Polymarket Fed Odds ({o['end']}):* rate-cut odds {prev:.0f}% → {cut:.0f}% — {d} "
+                      f"(hold {o['hold']*100:.0f}%, hike {o['hike']*100:.0f}%)")
+    return alerts
+
+
 # ============ Market Pulse: 0-100 bullish/bearish gauge + auto Telegram reports ============
 # Har poll me BTC(50%)+ETH(30%)+SOL(20%) se score banta hai: taker flow, L/S (contrarian),
 # funding (contrarian), 24h momentum, OI change. Data: OKX + Hyperliquid (free, no keys).
@@ -1395,6 +1586,10 @@ def main_loop():
             if poll_count % 6 == 1:  # every ~1 hour
                 alerts += check_btc_dominance(state)  # BTC.D trend (CoinGecko global)
                 alerts += check_deribit_options(state)  # put/call ratio + max pain
+                alerts += check_fred_releases(state)  # CPI/PPI/jobs prints → bullish/bearish verdict
+            if poll_count % 36 == 1:  # every ~6 hours
+                alerts += check_stablecoin_flows(state)  # DeFiLlama stablecoin liquidity
+                alerts += check_polymarket_fed(state)  # Polymarket FOMC odds shifts
             alerts += check_whales(state)
             alerts += check_volume_spike(state, prices)
             alerts += check_eth_whales(state, eth_price)      # every poll (~10 min)
