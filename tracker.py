@@ -17,6 +17,14 @@ No fixed price targets. Sends crisp alerts for:
   - Funding flips (Hyperliquid) - sentiment shift
   - Book walls radar (Hyperliquid) - scalping S/R
   - Volatility breakout 2x ATR (OKX candles) - expansion alerts
+- Whale radar: $1M+ ETH/BTC transfers (Etherscan free key / blockchain.info),
+  har transfer me from→to + explorer link; $5M+ ETH flow jo verified Binance hot
+  wallet ko chhooe = inflow (possible sell pressure) / withdrawal (holding signal) tag.
+- Market Pulse: 0-100 bullish/bearish gauge (BTC 60% + ETH 40%) from taker flow,
+  L/S ratio (contrarian), funding (contrarian), 24h momentum, OI change.
+  Report me verdict + main driver + flip watch lines. Auto Telegram reports:
+  extreme zone entry (>=75 / <=25), 15+ point swing in 2h, plus digest every
+  PULSE_DIGEST_HOURS (default 6, 0 = off). Data: OKX + Hyperliquid.
   - NOTE: Binance/Bybit geo-block US IPs (regulatory). No proxy jugaad - evading it
     violates their ToS and risks IP bans. Code tries Binance directly, accepts the
     block, falls back to OKX/Hyperliquid gracefully. Non-US server par Binance
@@ -29,6 +37,7 @@ Optional:
   WHALE_ALERT_API_KEY - free tier from whale-alert.io
   ETHERSCAN_API_KEY   - free key from etherscan.io (no card needed), enables ETH whale scan
   POLL_INTERVAL_SEC   - default 600 (10 min)
+  PULSE_DIGEST_HOURS  - Market Pulse digest interval in hours, default 6 (0 = off)
 
 Whale scan notes (free-tier honest design):
   - ETH: latest block scanned every poll via Etherscan (small blocks, cheap).
@@ -55,6 +64,16 @@ ETHERSCAN_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SEC", "600"))
 
 WHALE_USD_THRESHOLD = 1_000_000  # $1M+ transfers count as whale moves
+
+# ============ Whale exchange-flow radar (curated known wallets) ============
+# Verified 2026-10-19 via BaseScan/Arkham labels. Curated list - sirf Binance
+# (sabse bada exchange); exchanges hot wallets rotate karte hain, stale ho sakta hai.
+# Inflow = whale exchange bhej raha (possible sell pressure); outflow = nikal raha (holding signal).
+KNOWN_EXCHANGE_WALLETS = {
+    "0xf977814e90da44bfa03b6295a0616a897441acec": "Binance",
+    "0x28c6c06298d514db089934071355e5743bf21d60c": "Binance",
+}
+WHALE_EXCHANGE_FLOW_USD = 5_000_000  # isse bada exchange flow = special alert line
 
 # --- Futures data: 100% free, no API keys ---
 # Exchange priority: Binance first (biggest volume), automatic fallback to
@@ -251,10 +270,18 @@ def check_eth_whales(state, eth_price):
             if usd >= WHALE_USD_THRESHOLD:
                 h = tx.get("hash", "")
                 if h and can_alert(state, f"ethw_{h}", 86400):
+                    frm_full = (tx.get("from") or "").lower()
+                    to_full = (tx.get("to") or "").lower()
                     frm = (tx.get("from") or "?")[:12]
                     to = (tx.get("to") or "contract")[:12]
+                    tag = ""
+                    if usd >= WHALE_EXCHANGE_FLOW_USD:
+                        if to_full in KNOWN_EXCHANGE_WALLETS:
+                            tag = f"\n➡️ *{KNOWN_EXCHANGE_WALLETS[to_full]} inflow* — possible sell pressure"
+                        elif frm_full in KNOWN_EXCHANGE_WALLETS:
+                            tag = f"\n⬅️ *{KNOWN_EXCHANGE_WALLETS[frm_full]} withdrawal* — holding signal"
                     alerts.append(
-                        f"🐋 *ETH Whale:* {val_eth:,.0f} ETH (${usd:,.0f})\n`{frm}...` → `{to}...`")
+                        f"🐋 *ETH Whale:* {val_eth:,.0f} ETH (${usd:,.0f})\n`{frm}...` → `{to}...`{tag}\n[🔍 tx details](https://etherscan.io/tx/{h})")
     except Exception as e:
         print(f"[ETH WHALE ERROR] {e}")
     return alerts
@@ -289,7 +316,9 @@ def check_btc_whales(state, btc_price):
                 th = tx.get("hash", "")
                 if th and can_alert(state, f"btcw_{th}", 86400):
                     btc_amt = total_sat / 1e8
-                    alerts.append(f"🐋 *BTC Whale:* {btc_amt:,.1f} BTC (${usd:,.0f})")
+                    outs = sorted(tx.get("out", []), key=lambda o: o.get("value", 0), reverse=True)
+                    top_addr = (outs[0].get("addr", "") if outs else "")[:14]
+                    alerts.append(f"🐋 *BTC Whale:* {btc_amt:,.1f} BTC (${usd:,.0f})\n→ `{top_addr}...`\n[🔍 tx details](https://blockchain.info/tx/{th})")
     except Exception as e:
         print(f"[BTC WHALE ERROR] {e}")
     return alerts
@@ -712,6 +741,153 @@ def check_vol_breakout(state):
     return alerts
 
 
+# ============ Market Pulse: 0-100 bullish/bearish gauge + auto Telegram reports ============
+# Har poll me BTC(60%)+ETH(40%) se score banta hai: taker flow, L/S (contrarian),
+# funding (contrarian), 24h momentum, OI change. Data: OKX + Hyperliquid (free, no keys).
+# Binance/Bybit US se geo-blocked hain isliye nahi - OKX top-3 futures exchange hai,
+# Hyperliquid sabse bada perp DEX; signals market-wide hote hain.
+PULSE_DIGEST_HOURS = float(os.getenv("PULSE_DIGEST_HOURS", "6"))  # 0 = digest off
+
+
+def pulse_label(score):
+    if score >= 75:
+        return "Strong Bullish 🟢🟢"
+    if score >= 60:
+        return "Bullish 🟢"
+    if score >= 40:
+        return "Neutral ⚪"
+    if score >= 25:
+        return "Bearish 🔴"
+    return "Strong Bearish 🔴🔴"
+
+
+def pulse_verdict(score, subs):
+    """Ek nazar me verdict: bullish/bearish, sabse bada driver, aur flip watch."""
+    if score >= 75:
+        v = "Verdict: 🟢🟢 STRONG BULLISH — buyers ka clear control"
+    elif score >= 60:
+        v = "Verdict: 🟢 BULLISH LEAN — buyers halke aage"
+    elif score >= 40:
+        v = "Verdict: ⚪ NEUTRAL — koi clear edge nahi, wait-and-watch"
+    elif score >= 25:
+        v = "Verdict: 🔴 BEARISH LEAN — sellers halke aage"
+    else:
+        v = "Verdict: 🔴🔴 STRONG BEARISH — sellers ka clear control"
+    contrib = {}
+    for coin, w in (("BTC", 0.6), ("ETH", 0.4)):
+        _, p = subs[coin]
+        for k, name in (("taker", "taker flow"), ("ls", "L/S positioning"),
+                        ("fund", "funding"), ("mom", "momentum"), ("oim", "OI change")):
+            contrib[name] = contrib.get(name, 0) + p[k] * w
+    top = max(contrib.items(), key=lambda x: abs(x[1]))
+    d = f"Main driver: {top[0]} ({top[1]:+.0f} pts)"
+    if score >= 60:
+        f = "Flip watch: L/S 2.5+ ya funding extreme hua to score gir sakta hai"
+    elif score <= 40:
+        f = "Flip watch: taker buyers laute ya shorts squeeze ho to score uth sakta hai"
+    else:
+        f = "Clear edge ke liye 60+ (bullish) ya 40- (bearish) ka break dekho"
+    return v, d, f
+
+
+def coin_subscore(coin, hl_ctx, chg24, state):
+    """Ek coin ka sub-score (-50..+50). Components transparent rakhe hain."""
+    parts = {}
+    # 1. taker flow (30m)
+    try:
+        r = requests.get(OKX_API + "/api/v5/rubik/stat/taker-volume",
+                         params={"ccy": coin, "instType": "CONTRACTS"}, timeout=15).json()
+        data = r.get("data", [])
+        b = sum(float(x[1]) for x in data[:6])
+        s = sum(float(x[2]) for x in data[:6])
+        tr = b / s if s > 0 else 1.0
+    except Exception:
+        tr = 1.0
+    parts["taker_ratio"] = tr
+    parts["taker"] = 15 if tr >= 1.3 else 7 if tr >= 1.1 else 0 if tr >= 0.9 else -7 if tr >= 0.77 else -15
+    # 2. L/S ratio (contrarian: bheed long = bearish)
+    try:
+        r = requests.get(OKX_API + "/api/v5/rubik/stat/contracts/long-short-account-ratio",
+                         params={"ccy": coin}, timeout=15).json()
+        lsr = float(r["data"][0][1])
+    except Exception:
+        lsr = 1.5
+    parts["lsr"] = lsr
+    parts["ls"] = -10 if lsr >= 2.5 else -5 if lsr >= 2.0 else 10 if lsr <= 0.7 else 5 if lsr <= 1.0 else 0
+    # 3. funding (contrarian: zyada positive = crowded longs)
+    fr = (hl_ctx.get(coin) or {}).get("funding", 0) or 0
+    parts["funding"] = fr
+    parts["fund"] = -10 if fr >= 0.0001 else -5 if fr >= 0.00005 else 10 if fr <= -0.0001 else 5 if fr <= -0.00005 else 0
+    # 4. 24h momentum
+    parts["mom24"] = chg24
+    parts["mom"] = 10 if chg24 >= 3 else 5 if chg24 >= 1 else 0 if chg24 > -1 else -5 if chg24 > -3 else -10
+    # 5. OI change (pichhle poll se; check_liquidity_hl state me oi_{coin} rakhta hai)
+    oi = (hl_ctx.get(coin) or {}).get("oi_usd", 0) or 0
+    prev_oi = state.get(f"oi_{coin}", 0)
+    oi_chg = (oi - prev_oi) / prev_oi if prev_oi and oi else 0
+    parts["oi_chg"] = oi_chg
+    parts["oim"] = 5 if oi_chg > 0.03 else -5 if oi_chg < -0.03 else 0
+    sub = parts["taker"] + parts["ls"] + parts["fund"] + parts["mom"] + parts["oim"]
+    return sub, parts
+
+
+def pulse_report_text(score, label, subs, hl_ctx, header):
+    v, d, f = pulse_verdict(score, subs)
+    lines = [header, f"*Market Pulse: {score}/100 — {label}*",
+             f"_{v}_", f"_{d}_", f"_{f}_", ""]
+    for coin in ("BTC", "ETH"):
+        sub, p = subs[coin]
+        mid = (hl_ctx.get(coin) or {}).get("mid", 0) or 0
+        arrow = "▲" if sub > 5 else "▼" if sub < -5 else "●"
+        tk = "🟢 buyers" if p["taker"] > 0 else "🔴 sellers" if p["taker"] < 0 else "⚪ neutral"
+        lines.append(f"{arrow} *{coin}* ${mid:,.0f} (sub {sub:+d}): {tk} {p['taker_ratio']:.2f}x | "
+                     f"L/S {p['lsr']:.2f} | fund {p['funding']*100:.4f}%/h | "
+                     f"24h {p['mom24']:+.1f}% | OI {p['oi_chg']:+.1%}")
+    lines += ["", "_Score = taker flow + L/S (contrarian) + funding (contrarian) + 24h momentum + OI change. "
+              "Ye signal hai, financial advice nahi._"]
+    return "\n".join(lines)
+
+
+def check_market_pulse(state, hl_ctx, prices):
+    """Market Pulse score + auto Telegram reports: extreme zone entry, bada swing, digest."""
+    alerts = []
+    now = time.time()
+    subs = {}
+    for coin, cg in (("BTC", "bitcoin"), ("ETH", "ethereum")):
+        chg24 = (prices.get(cg) or {}).get("usd_24h_change", 0) or 0
+        subs[coin] = coin_subscore(coin, hl_ctx, chg24, state)
+    score = max(0, min(100, round(50 + 0.6 * subs["BTC"][0] + 0.4 * subs["ETH"][0])))
+    label = pulse_label(score)
+    hist = state.get("pulse_hist", [])
+    hist.append([now, score])
+    hist = [h for h in hist if now - h[0] <= 4 * 3600][-25:]
+    state["pulse_hist"] = hist
+    state["pulse_score"] = score
+    # trigger 1: extreme zone me entry
+    prev_zone = state.get("pulse_zone", "mid")
+    zone = "ext_bull" if score >= 75 else "ext_bear" if score < 25 else "mid"
+    if zone != prev_zone and zone != "mid" and can_alert(state, f"pulse_zone_{zone}", 21600):
+        alerts.append(pulse_report_text(
+            score, label, subs, hl_ctx,
+            "🚨 *Market Pulse Alert:* market extreme zone me enter hua"))
+    state["pulse_zone"] = zone
+    # trigger 2: 2 ghante me 15+ points ka swing
+    target = now - 2 * 3600
+    old = min(hist, key=lambda h: abs(h[0] - target)) if hist else None
+    if old and abs(now - old[0] - 2 * 3600) < 1800:
+        swing = score - old[1]
+        if abs(swing) >= 15 and can_alert(state, "pulse_swing", 7200):
+            d = "tez bullish shift 📈" if swing > 0 else "tez bearish shift 📉"
+            alerts.append(pulse_report_text(
+                score, label, subs, hl_ctx,
+                f"⚡ *Market Pulse Swing:* 2 ghante me {swing:+.0f} points — {d}"))
+    # trigger 3: periodic digest
+    if PULSE_DIGEST_HOURS > 0 and now - state.get("pulse_digest_ts", 0) >= PULSE_DIGEST_HOURS * 3600:
+        state["pulse_digest_ts"] = now
+        alerts.append(pulse_report_text(score, label, subs, hl_ctx, "🎯 *Market Pulse Digest*"))
+    return alerts
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     # Render Free Web Service + UptimeRobot keep-alive endpoint
     def do_GET(self):
@@ -763,6 +939,7 @@ def main_loop():
             alerts += check_eth_whales(state, eth_price)      # every poll (~10 min)
             alerts += check_liquidations(state, hl_ctx)       # every poll
             alerts += check_funding(state, hl_ctx)             # every poll
+            alerts += check_market_pulse(state, hl_ctx, prices) # every poll (OI momentum ke liye liquidity se pehle)
             alerts += check_liquidity_hl(state, hl_ctx)        # every poll
             alerts += check_ls_ratio(state)                   # every poll
             alerts += check_taker_pressure(state)             # every poll

@@ -26,6 +26,15 @@ No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
   - Funding flips: funding ka sign flip = sentiment shift ka pehla ishara
   - Book walls radar: $5M+ ki diwarein (2% ke andar) = scalping ke live S/R
   - Volatility breakout: 15m candle 2x ATR se bada = expansion shuru
+- **Market Pulse (0-100 bullish/bearish gauge):** har poll me BTC (60%) + ETH (40%)
+  se score — taker flow, L/S ratio (contrarian), funding (contrarian), 24h momentum,
+  OI change. Report me **verdict + main driver + flip watch** lines — ek nazar me
+  bullish/bearish clear. Auto Telegram reports: extreme zone entry (75+ / 25-),
+  2 ghante me 15+ points ka swing, aur har 6 ghante me digest. Data: OKX + Hyperliquid
+  (Binance/Bybit US se geo-blocked, isliye nahi — dono top-tier volume wale hain)
+- **Whale radar detail:** har $1M+ transfer me from→to + explorer link (tap karke
+  full details); $5M+ ETH flow jo verified Binance hot wallet se jude = **inflow**
+  (possible sell pressure) / **withdrawal** (holding signal) tag ke saath
 
 Note: Binance/Bybit US IPs ko regulatory wajah se geo-block karte hain.
 Proxy/VPN se ye block todna unke ToS ke khilaaf hai (ban ka risk), isliye
@@ -67,6 +76,7 @@ Free service 15 min idle ke baad so jati hai, isliye UptimeRobot (free, 50 monit
      isse ETH whale scan chalta hai
    - `WHALE_ALERT_API_KEY` = optional
    - `POLL_INTERVAL_SEC` = 600
+   - `PULSE_DIGEST_HOURS` = 6 (Market Pulse digest har 6 ghante; 0 karne se digest band, event alerts chalte rahenge)
 7. Deploy dabao. URL milega jaise:
    `https://crypto-macro-whale-tracker.onrender.com`
 8. Browser me `https://tumhara-url.onrender.com/health` kholo,
