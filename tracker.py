@@ -24,11 +24,18 @@ No fixed price targets. Sends crisp alerts for:
 - Whale radar: $1M+ ETH/BTC transfers (Etherscan free key / blockchain.info),
   har transfer me from→to + explorer link; $5M+ ETH flow jo verified Binance hot
   wallet ko chhooe = inflow (possible sell pressure) / withdrawal (holding signal) tag.
-- Market Pulse: 0-100 bullish/bearish gauge (BTC 60% + ETH 40%) from taker flow,
+- Meme/Alt Pump Radar: OKX 1H candles par DOGE/PEPE/SHIB/WIF/BONK/FLOKI/PENGU/TRUMP ka
+  volume anomaly scan — 3x+ volume + shant price = "Volume Building" (pump se pehle
+  wala early warning); 3x+ volume + price up = "Pump Alert". Plus HL perps par
+  deeply negative funding + solid OI wale alts = short-squeeze setups. (Note: koi
+  indicator pump ki 100% guarantee nahi deta — volume-leads-price hi asal edge hai.)
+- Market Pulse: 0-100 bullish/bearish gauge (BTC 50% + ETH 30% + SOL 20%) from taker flow,
   L/S ratio (contrarian), funding (contrarian), 24h momentum, OI change.
-  Report me verdict + main driver + flip watch lines. Auto Telegram reports:
-  extreme zone entry (>=75 / <=25), 15+ point swing in 2h, plus digest every
-  PULSE_DIGEST_HOURS (default 6, 0 = off). Data: OKX + Hyperliquid.
+  Report me verdict + main driver + flip watch + Fear&Greed/BTC.D context.
+  Auto Telegram reports: extreme zone entry (>=75 / <=25), 15+ point swing in 2h,
+  plus digest every PULSE_DIGEST_HOURS (default 6, 0 = off). Data: OKX + Hyperliquid.
+- Sentiment & positioning: Fear & Greed extremes (contrarian), BTC dominance trend
+  (alt pressure vs alt-friendly), Deribit BTC/ETH options put/call OI ratio + max pain.
   - NOTE: Binance/Bybit geo-block US IPs (regulatory). No proxy jugaad - evading it
     violates their ToS and risks IP bans. Code tries Binance directly, accepts the
     block, falls back to OKX/Hyperliquid gracefully. Non-US server par Binance
@@ -844,8 +851,178 @@ def check_vol_breakout(state):
     return alerts
 
 
+# ============ L1/L2 Pump Radar: volume anomaly = early warning ============
+# Solid Layer-1 / Layer-2 projects (meme coins hata diye gaye). Volume aksar price se
+# PEHLE bolta hai. OKX 1H candles par har coin ka volume scan:
+# pichhle 1H ka volume vs pichhle 24H ka average. 3x+ volume + price abhi shant =
+# "Volume Building" (pump se pehle wala signal). 3x+ volume + price up = "Pump Alert".
+# Free, koi key nahi.
+PUMP_WATCHLIST = ["SOL-USDT", "AVAX-USDT", "NEAR-USDT", "SUI-USDT", "APT-USDT",
+                  "SEI-USDT", "INJ-USDT", "ATOM-USDT", "ARB-USDT", "OP-USDT",
+                  "DOT-USDT", "POL-USDT"]
+
+
+def check_pump_radar(state):
+    alerts = []
+    for sym in PUMP_WATCHLIST:
+        try:
+            r = requests.get(OKX_API + "/api/v5/market/candles",
+                             params={"instId": sym, "bar": "1H", "limit": "25"},
+                             timeout=15).json()
+            cs = r.get("data", [])
+            if len(cs) < 25:
+                continue
+            vols = [float(c[5]) for c in cs]  # newest-first; cs[0] = forming candle
+            cur_vol = vols[1]
+            avg_vol = sum(vols[2:]) / 23
+            if avg_vol <= 0:
+                continue
+            vratio = cur_vol / avg_vol
+            last_close = float(cs[1][4])
+            chg_1h = (last_close / float(cs[2][4]) - 1) * 100
+            chg_24h = (last_close / float(cs[24][4]) - 1) * 100
+            coin = sym.split("-")[0]
+            if vratio >= 3:
+                if chg_1h >= 8 or chg_24h >= 20:
+                    if can_alert(state, f"pumpgo_{coin}", 10800):
+                        alerts.append(
+                            f"🚀 *Pump Alert ({coin}):* {chg_1h:+.1f}% (1h) / {chg_24h:+.1f}% (24h), "
+                            f"volume {vratio:.1f}x average — momentum chal raha hai!")
+                elif chg_1h < 5 and chg_24h < 15:
+                    if can_alert(state, f"pumpbuild_{coin}", 21600):
+                        alerts.append(
+                            f"👀 *Volume Building ({coin}):* 1H volume {vratio:.1f}x average, "
+                            f"price {chg_1h:+.1f}% (1h) / {chg_24h:+.1f}% (24h) — "
+                            f"pump se pehle wala signal, nazar rakho.")
+        except Exception as e:
+            print(f"[PUMP RADAR ERROR {sym}] {e}")
+    return alerts
+
+
+def check_alt_squeeze(state):
+    """HL perps: deeply negative funding + solid OI wale alts = short-squeeze fuel."""
+    alerts = []
+    try:
+        d = hl_post({"type": "metaAndAssetCtxs"})
+        if not d or not isinstance(d, list) or len(d) < 2:
+            return alerts
+        for m, c in zip(d[0].get("universe", []), d[1]):
+            name = m.get("name")
+            if not name or name in ("BTC", "ETH", "SOL"):
+                continue
+            try:
+                fr = float(c.get("funding") or 0)
+                mid = float(c.get("midPx") or 0)
+                oi = float(c.get("openInterest") or 0) * mid
+            except (ValueError, TypeError):
+                continue
+            if fr <= -0.0005 and oi >= 10_000_000:  # -0.05%/h ya zyada negative, $10M+ OI
+                if can_alert(state, f"squeeze_{name}", 43200):
+                    alerts.append(
+                        f"🗜️ *Squeeze Setup ({name}):* funding {fr*100:.4f}%/h (shorts crowded), "
+                        f"OI ${oi/1e6:.0f}M — short squeeze ka fuel taiyaar hai.")
+    except Exception as e:
+        print(f"[SQUEEZE ERROR] {e}")
+    return alerts
+
+
+# ============ v8: Fear & Greed + BTC Dominance + Deribit Options ============
+def check_fear_greed(state):
+    """Fear & Greed index (alternative.me, free, no key). Extremes = contrarian signal."""
+    alerts = []
+    try:
+        r = requests.get("https://api.alternative.me/fng/", params={"limit": "1"}, timeout=15).json()
+        d = (r.get("data") or [{}])[0]
+        v = int(d.get("value", 50))
+        cls = d.get("value_classification", "")
+        state["fng_value"] = v
+        state["fng_class"] = cls
+        if v <= 25 and can_alert(state, "fng_fear", 86400):
+            alerts.append(f"😨 *Fear & Greed: {v}/100 ({cls})* — extreme fear, contrarian bullish setup (bheed darr rahi hai).")
+        elif v >= 75 and can_alert(state, "fng_greed", 86400):
+            alerts.append(f"🤑 *Fear & Greed: {v}/100 ({cls})* — extreme greed, contrarian caution (bheed lalchi hai).")
+    except Exception as e:
+        print(f"[FNG ERROR] {e}")
+    return alerts
+
+
+def check_btc_dominance(state):
+    """BTC dominance trend (CoinGecko /global, free). Rising = alts par pressure, falling = alt-friendly."""
+    alerts = []
+    try:
+        now = time.time()
+        r = requests.get("https://api.coingecko.com/api/v3/global", timeout=20).json()
+        dom = float(r["data"]["market_cap_percentage"]["btc"])
+        hist = state.get("btcd_hist", [])
+        hist.append([now, dom])
+        hist = [h for h in hist if now - h[0] <= 48 * 3600][-50:]
+        state["btcd_hist"] = hist
+        state["btc_dominance"] = dom
+        target = now - 24 * 3600
+        old = min(hist, key=lambda h: abs(h[0] - target)) if hist else None
+        if old and abs(now - old[0] - 24 * 3600) < 3600:
+            chg = dom - old[1]
+            if abs(chg) >= 1.5 and can_alert(state, "btcd_move", 86400):
+                d = "up — alts (SOL) par pressure" if chg > 0 else "down — alt-friendly mahol"
+                alerts.append(f"👑 *BTC Dominance:* {dom:.1f}% ({chg:+.1f}pp / 24h) — {d}.")
+    except Exception as e:
+        print(f"[BTCD ERROR] {e}")
+    return alerts
+
+
+def check_deribit_options(state):
+    """Deribit BTC/ETH options: put/call OI ratio + aggregate max pain. Free public API."""
+    alerts = []
+    for curr in ("BTC", "ETH"):
+        try:
+            r = requests.get("https://www.deribit.com/api/v2/public/get_book_summary_by_currency",
+                             params={"currency": curr, "kind": "option"}, timeout=25).json()
+            call_oi = put_oi = 0.0
+            strikes = {}
+            for o in r.get("result", []):
+                p = o.get("instrument_name", "").split("-")  # BTC-27DEC26-80000-C
+                if len(p) < 4:
+                    continue
+                try:
+                    k = float(p[2])
+                except ValueError:
+                    continue
+                t = p[3]
+                if t not in ("C", "P"):
+                    continue
+                oi = float(o.get("open_interest") or 0)
+                if t == "C":
+                    call_oi += oi
+                else:
+                    put_oi += oi
+                s = strikes.setdefault(k, [0.0, 0.0])
+                s[0 if t == "C" else 1] += oi
+            if call_oi <= 0 or not strikes:
+                continue
+            pc = put_oi / call_oi
+            ks = sorted(strikes)
+            def _pain(s):
+                tot = 0.0
+                for k, (c, pp) in strikes.items():
+                    if s > k:
+                        tot += c * (s - k)
+                    elif s < k:
+                        tot += pp * (k - s)
+                return tot
+            mp = min(ks, key=_pain)
+            state[f"derib_pc_{curr}"] = round(pc, 2)
+            state[f"derib_mp_{curr}"] = mp
+            if pc >= 1.3 and can_alert(state, f"derib_pc_high_{curr}", 86400):
+                alerts.append(f"🎯 *Options ({curr}):* Put/Call OI {pc:.2f} — heavy hedging/fear, contrarian bullish setup. Max pain ~${mp:,.0f}.")
+            elif pc <= 0.5 and can_alert(state, f"derib_pc_low_{curr}", 86400):
+                alerts.append(f"🎯 *Options ({curr}):* Put/Call OI {pc:.2f} — complacency (hedge nahi), contrarian caution. Max pain ~${mp:,.0f}.")
+        except Exception as e:
+            print(f"[DERIBIT ERROR {curr}] {e}")
+    return alerts
+
+
 # ============ Market Pulse: 0-100 bullish/bearish gauge + auto Telegram reports ============
-# Har poll me BTC(60%)+ETH(40%) se score banta hai: taker flow, L/S (contrarian),
+# Har poll me BTC(50%)+ETH(30%)+SOL(20%) se score banta hai: taker flow, L/S (contrarian),
 # funding (contrarian), 24h momentum, OI change. Data: OKX + Hyperliquid (free, no keys).
 # Binance/Bybit US se geo-blocked hain isliye nahi - OKX top-3 futures exchange hai,
 # Hyperliquid sabse bada perp DEX; signals market-wide hote hain.
@@ -877,7 +1054,7 @@ def pulse_verdict(score, subs):
     else:
         v = "Verdict: 🔴🔴 STRONG BEARISH — sellers ka clear control"
     contrib = {}
-    for coin, w in (("BTC", 0.6), ("ETH", 0.4)):
+    for coin, w in (("BTC", 0.5), ("ETH", 0.3), ("SOL", 0.2)):
         _, p = subs[coin]
         for k, name in (("taker", "taker flow"), ("ls", "L/S positioning"),
                         ("fund", "funding"), ("mom", "momentum"), ("oim", "OI change")):
@@ -934,11 +1111,11 @@ def coin_subscore(coin, hl_ctx, chg24, state):
     return sub, parts
 
 
-def pulse_report_text(score, label, subs, hl_ctx, header):
+def pulse_report_text(score, label, subs, hl_ctx, header, extra=""):
     v, d, f = pulse_verdict(score, subs)
     lines = [header, f"*Market Pulse: {score}/100 — {label}*",
              f"_{v}_", f"_{d}_", f"_{f}_", ""]
-    for coin in ("BTC", "ETH"):
+    for coin in ("BTC", "ETH", "SOL"):
         sub, p = subs[coin]
         mid = (hl_ctx.get(coin) or {}).get("mid", 0) or 0
         arrow = "▲" if sub > 5 else "▼" if sub < -5 else "●"
@@ -948,6 +1125,8 @@ def pulse_report_text(score, label, subs, hl_ctx, header):
                      f"24h {p['mom24']:+.1f}% | OI {p['oi_chg']:+.1%}")
     lines += ["", "_Score = taker flow + L/S (contrarian) + funding (contrarian) + 24h momentum + OI change. "
               "Ye signal hai, financial advice nahi._"]
+    if extra:
+        lines.append(f"_{extra}_")
     return "\n".join(lines)
 
 
@@ -956,11 +1135,18 @@ def check_market_pulse(state, hl_ctx, prices):
     alerts = []
     now = time.time()
     subs = {}
-    for coin, cg in (("BTC", "bitcoin"), ("ETH", "ethereum")):
+    for coin, cg in (("BTC", "bitcoin"), ("ETH", "ethereum"), ("SOL", "solana")):
         chg24 = (prices.get(cg) or {}).get("usd_24h_change", 0) or 0
         subs[coin] = coin_subscore(coin, hl_ctx, chg24, state)
-    score = max(0, min(100, round(50 + 0.6 * subs["BTC"][0] + 0.4 * subs["ETH"][0])))
+    score = max(0, min(100, round(50 + 0.5 * subs["BTC"][0] + 0.3 * subs["ETH"][0] + 0.2 * subs["SOL"][0])))
     label = pulse_label(score)
+    # digest extra: Fear & Greed + BTC dominance (agar available)
+    bits = []
+    if state.get("fng_value") is not None:
+        bits.append(f"F&G {state['fng_value']}/100 ({state.get('fng_class', '')})")
+    if state.get("btc_dominance"):
+        bits.append(f"BTC.D {state['btc_dominance']:.1f}%")
+    extra = " | ".join(bits)
     hist = state.get("pulse_hist", [])
     hist.append([now, score])
     hist = [h for h in hist if now - h[0] <= 4 * 3600][-25:]
@@ -972,7 +1158,7 @@ def check_market_pulse(state, hl_ctx, prices):
     if zone != prev_zone and zone != "mid" and can_alert(state, f"pulse_zone_{zone}", 21600):
         alerts.append(pulse_report_text(
             score, label, subs, hl_ctx,
-            "🚨 *Market Pulse Alert:* market extreme zone me enter hua"))
+            "🚨 *Market Pulse Alert:* market extreme zone me enter hua", extra))
     state["pulse_zone"] = zone
     # trigger 2: 2 ghante me 15+ points ka swing
     target = now - 2 * 3600
@@ -983,11 +1169,11 @@ def check_market_pulse(state, hl_ctx, prices):
             d = "tez bullish shift 📈" if swing > 0 else "tez bearish shift 📉"
             alerts.append(pulse_report_text(
                 score, label, subs, hl_ctx,
-                f"⚡ *Market Pulse Swing:* 2 ghante me {swing:+.0f} points — {d}"))
+                f"⚡ *Market Pulse Swing:* 2 ghante me {swing:+.0f} points — {d}", extra))
     # trigger 3: periodic digest
     if PULSE_DIGEST_HOURS > 0 and now - state.get("pulse_digest_ts", 0) >= PULSE_DIGEST_HOURS * 3600:
         state["pulse_digest_ts"] = now
-        alerts.append(pulse_report_text(score, label, subs, hl_ctx, "🎯 *Market Pulse Digest*"))
+        alerts.append(pulse_report_text(score, label, subs, hl_ctx, "🎯 *Market Pulse Digest*", extra))
     return alerts
 
 
@@ -1040,6 +1226,12 @@ def main_loop():
             alerts += check_event_calendar(state)  # FOMC/CPI advance alerts, no API
             if poll_count % 3 == 1:  # every ~30 min (GDELT: 1 req / 5 sec)
                 alerts += check_macro_news(state)  # Fed news + financial press crypto coverage
+                alerts += check_pump_radar(state)  # L1/L2 volume anomaly (OKX 1H)
+                alerts += check_alt_squeeze(state)  # HL alt funding squeeze setups
+                alerts += check_fear_greed(state)  # Fear & Greed extremes
+            if poll_count % 6 == 1:  # every ~1 hour
+                alerts += check_btc_dominance(state)  # BTC.D trend (CoinGecko global)
+                alerts += check_deribit_options(state)  # put/call ratio + max pain
             alerts += check_whales(state)
             alerts += check_volume_spike(state, prices)
             alerts += check_eth_whales(state, eth_price)      # every poll (~10 min)

@@ -29,15 +29,28 @@ No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
   - Funding flips: funding ka sign flip = sentiment shift ka pehla ishara
   - Book walls radar: $5M+ ki diwarein (2% ke andar) = scalping ke live S/R
   - Volatility breakout: 15m candle 2x ATR se bada = expansion shuru
-- **Market Pulse (0-100 bullish/bearish gauge):** har poll me BTC (60%) + ETH (40%)
+- **Market Pulse (0-100 bullish/bearish gauge):** har poll me BTC (50%) + ETH (30%) + SOL (20%)
   se score — taker flow, L/S ratio (contrarian), funding (contrarian), 24h momentum,
-  OI change. Report me **verdict + main driver + flip watch** lines — ek nazar me
-  bullish/bearish clear. Auto Telegram reports: extreme zone entry (75+ / 25-),
+  OI change. Report me **verdict + main driver + flip watch** + Fear&Greed/BTC.D context.
+  Auto Telegram reports: extreme zone entry (75+ / 25-),
   2 ghante me 15+ points ka swing, aur har 6 ghante me digest. Data: OKX + Hyperliquid
   (Binance/Bybit US se geo-blocked, isliye nahi — dono top-tier volume wale hain)
+- **Sentiment & positioning:** Fear & Greed extremes (contrarian alerts), BTC dominance
+  trend (alt pressure vs alt-friendly), Deribit BTC/ETH options put/call OI ratio + max pain
+- **L1/L2 Pump Radar:** SOL/AVAX/NEAR/SUI/APT/SEI/INJ/ATOM/ARB/OP/DOT/POL ka OKX 1H
+  volume anomaly scan (har ~30 min) — 3x+ volume + shant price = "Volume Building"
+  early warning; 3x+ volume + price up = "Pump Alert". HL perps par deeply negative
+  funding + solid OI wale alts = short-squeeze setups. Note: koi indicator pump ki
+  100% guarantee nahi deta — volume-leads-price hi asal edge hai
 - **Whale radar detail:** har $1M+ transfer me from→to + explorer link (tap karke
   full details); $5M+ ETH flow jo verified Binance hot wallet se jude = **inflow**
   (possible sell pressure) / **withdrawal** (holding signal) tag ke saath
+- **Meme/Alt Pump Radar:** DOGE/PEPE/SHIB/WIF/BONK/FLOKI/PENGU/TRUMP ka OKX 1H
+  volume anomaly scan (har ~30 min) — 3x+ volume + shant price = "Volume Building"
+  early warning; 3x+ volume + price up = "Pump Alert". HL perps par deeply negative
+  funding + solid OI wale alts = short-squeeze setups. Note: koi indicator pump ki
+  100% guarantee nahi deta — volume-leads-price hi asal edge hai
+  [REMOVED v8: user ne meme coins hatane ko kaha — ab sirf L1/L2 watchlist]
 
 Note: Binance/Bybit US IPs ko regulatory wajah se geo-block karte hain.
 Proxy/VPN se ye block todna unke ToS ke khilaaf hai (ban ka risk), isliye
