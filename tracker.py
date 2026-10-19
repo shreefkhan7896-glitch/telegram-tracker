@@ -3,6 +3,9 @@
 No fixed price targets. Sends crisp alerts for:
 - War / geopolitical news (bearish for crypto)
 - Macro: DXY up, US10Y yields up, Crude Oil spike (bearish)
+- Fed/Macro news: GDELT se Fed/FOMC/CPI breaking news + bade financial press
+  (Bloomberg/Reuters/WSJ/CoinDesk) ki crypto coverage par alerts
+- Event calendar: FOMC + CPI dates hardcoded — 1 din pehle aur us din advance alert
 - Whales: $1M+ transfers on ETH (Etherscan, free key) and BTC (blockchain.info, no key);
   optional Whale Alert API ($10M+) if key provided
 - Spot: unusual volume spikes on BTC/ETH/SOL
@@ -54,7 +57,7 @@ import time
 import json
 import threading
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -221,6 +224,67 @@ def check_war_news(state):
     except Exception as e:
         print(f"[GDELT ERROR] {e}")
     return alerts
+
+
+def check_macro_news(state):
+    """GDELT free API: Fed/macro breaking news + bade financial press ki crypto coverage. No key.
+    NOTE: GDELT allows ~1 req / 5 sec — isliye har query se pehle 6s sleep."""
+    alerts = []
+    queries = [
+        # (key, query, cooldown_sec, prefix)
+        ("fed",
+         '("Federal Reserve" OR FOMC OR "rate decision" OR "rate cut" OR "rate hike" OR CPI) AND (market OR stocks OR crypto OR bitcoin)',
+         21600, "🏦 *Fed/Macro News:*"),
+        ("press",
+         '(bitcoin OR crypto) AND (ETF OR regulation OR "central bank" OR "Wall Street")',
+         43200, "📰 *Crypto Press:*"),
+    ]
+    for key, q, cd, prefix in queries:
+        try:
+            time.sleep(6)  # GDELT rate limit respect
+            url = "https://api.gdeltproject.org/api/v2/doc/doc"
+            params = {"query": q, "mode": "ArtList", "maxrecords": 3, "format": "json", "timespan": "6h"}
+            r = requests.get(url, params=params, timeout=20)
+            articles = r.json().get("articles", [])
+            if articles and can_alert(state, f"macronews_{key}", cd):
+                top = articles[0]
+                title = top.get("title", "Macro news")[:130]
+                src = top.get("source", "")
+                alerts.append(f"{prefix} {title}\n_{src}_ — crypto par asar pad sakta hai.")
+        except Exception as e:
+            print(f"[GDELT MACRO ERROR {key}] {e}")
+    return alerts
+
+
+# ============ Macro event calendar (FOMC + CPI) ============
+# Dates verified: Fed official FOMC calendar + BLS CPI schedule.
+# FOMC decision 2pm ET (2nd day); CPI 8:30am ET. List saal me ek baar update karo.
+MACRO_EVENTS = [
+    (2026, 10, 28, "FOMC rate decision", "~11:30 PM IST"),
+    (2026, 11, 10, "US CPI data", "~7:00 PM IST"),
+    (2026, 12, 9, "FOMC rate decision + dot plot", "~12:30 AM IST (10 Dec)"),
+    (2026, 12, 10, "US CPI data", "~7:00 PM IST"),
+    (2027, 1, 13, "US CPI data", "~7:00 PM IST"),
+]
+
+
+def check_event_calendar(state):
+    """Aane wale Fed/CPI events ke advance alerts (1 din pehle + us din). Koi API nahi."""
+    alerts = []
+    try:
+        ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        today = ist_now.date()
+        for y, m, d, name, t in MACRO_EVENTS:
+            delta = (date(y, m, d) - today).days
+            tag = f"{y}{m:02d}{d:02d}"
+            if delta == 1 and can_alert(state, f"evt_pre_{tag}", 86400):
+                alerts.append(f"⏰ *Kal: {name}* ({t}) — bada volatility event, leverage sambhal ke.")
+            elif delta == 0 and can_alert(state, f"evt_day_{tag}", 43200):
+                alerts.append(f"📅 *Aaj: {name}* ({t}) — market me tez move aa sakta hai, caution.")
+    except Exception as e:
+        print(f"[CALENDAR ERROR] {e}")
+    return alerts
+
 
 def check_whales(state):
     alerts = []
@@ -934,6 +998,9 @@ def main_loop():
 
             alerts += check_macro(state)
             alerts += check_war_news(state)
+            alerts += check_event_calendar(state)  # FOMC/CPI advance alerts, no API
+            if poll_count % 3 == 1:  # every ~30 min (GDELT: 1 req / 5 sec)
+                alerts += check_macro_news(state)  # Fed news + financial press crypto coverage
             alerts += check_whales(state)
             alerts += check_volume_spike(state, prices)
             alerts += check_eth_whales(state, eth_price)      # every poll (~10 min)
