@@ -10,6 +10,13 @@ No fixed price targets. Sends crisp alerts for:
   - Liquidations: Binance first (biggest volume), auto-fallback to OKX if geo-blocked
   - Funding extremes: Binance first, Hyperliquid fallback (crowded longs/shorts)
   - Liquidity: order-book bid/ask imbalance + Open Interest changes via Hyperliquid
+  - L/S ratio extremes (OKX) - contrarian signal
+  - Taker buy/sell pressure (OKX) - aggressive flow
+  - OI + price divergence - trend strength
+  - Perp premium extremes (Hyperliquid) - overheated/discount
+  - Funding flips (Hyperliquid) - sentiment shift
+  - Book walls radar (Hyperliquid) - scalping S/R
+  - Volatility breakout 2x ATR (OKX candles) - expansion alerts
   - NOTE: Binance/Bybit geo-block US IPs (regulatory). No proxy jugaad - evading it
     violates their ToS and risks IP bans. Code tries Binance directly, accepts the
     block, falls back to OKX/Hyperliquid gracefully. Non-US server par Binance
@@ -499,6 +506,212 @@ def check_liquidity_hl(state, hl_ctx):
     return alerts
 
 
+# ================= Futures pack v2: 7 advanced features (all free, no keys) =================
+
+def check_ls_ratio(state):
+    """OKX long/short account ratio extremes - contrarian signal."""
+    alerts = []
+    for coin, _, _ in FUT_SYMBOLS:
+        try:
+            r = requests.get(OKX_API + "/api/v5/rubik/stat/contracts/long-short-account-ratio",
+                             params={"ccy": coin}, timeout=15).json()
+        except Exception as e:
+            print(f"[OKX LSR ERROR {coin}] {e}")
+            continue
+        data = r.get("data", [])
+        if not data:
+            continue
+        try:
+            ratio = float(data[0][1])
+        except (ValueError, TypeError, IndexError):
+            continue
+        if ratio >= 2.5 and can_alert(state, f"lsr_{coin}_hi", 21600):
+            alerts.append(f"⚖️ *L/S Ratio Extreme ({coin}):* {ratio:.2f} — bheed long me ghusi hai (contrarian bearish 📉)")
+        elif ratio <= 0.7 and can_alert(state, f"lsr_{coin}_lo", 21600):
+            alerts.append(f"⚖️ *L/S Ratio Extreme ({coin}):* {ratio:.2f} — bheed short me ghusi hai (contrarian bullish 📈)")
+    return alerts
+
+
+def check_taker_pressure(state):
+    """OKX taker buy/sell volume - kaun aggressive hai.
+    NOTE: columns [ts, buyVol, sellVol] - direction empirically verified."""
+    alerts = []
+    for coin, _, _ in FUT_SYMBOLS:
+        try:
+            r = requests.get(OKX_API + "/api/v5/rubik/stat/taker-volume",
+                             params={"ccy": coin, "instType": "CONTRACTS"}, timeout=15).json()
+        except Exception as e:
+            print(f"[OKX TAKER ERROR {coin}] {e}")
+            continue
+        data = r.get("data", [])
+        if len(data) < 6:
+            continue
+        buy = sell = 0.0
+        for row in data[:6]:  # last ~30 min
+            try:
+                buy += float(row[1])
+                sell += float(row[2])
+            except (ValueError, TypeError, IndexError):
+                continue
+        if sell <= 0:
+            continue
+        ratio = buy / sell
+        if ratio >= 1.5 and can_alert(state, f"taker_{coin}_buy", 14400):
+            alerts.append(f"🟢 *Taker Pressure ({coin}):* buyers aggressive — buy/sell {ratio:.2f}x (30 min)")
+        elif ratio <= 0.67 and can_alert(state, f"taker_{coin}_sell", 14400):
+            alerts.append(f"🔴 *Taker Pressure ({coin}):* sellers aggressive — buy/sell {ratio:.2f}x (30 min)")
+    return alerts
+
+
+def get_funding_hist(coin, hours=3):
+    """Hyperliquid hourly funding+premium history."""
+    d = hl_post({"type": "fundingHistory", "coin": coin,
+                 "startTime": int((time.time() - hours * 3600) * 1000),
+                 "endTime": int(time.time() * 1000)})
+    return d if isinstance(d, list) else []
+
+
+def check_premium(state):
+    """Perp premium extremes vs spot (Hyperliquid)."""
+    alerts = []
+    for coin, _, _ in FUT_SYMBOLS:
+        hist = get_funding_hist(coin, 2)
+        if not hist:
+            continue
+        try:
+            prem = float(hist[-1].get("premium", 0))
+        except (ValueError, TypeError):
+            continue
+        if abs(prem) >= 0.001:  # 0.1%
+            bucket = "pos" if prem > 0 else "neg"
+            if can_alert(state, f"prem_{coin}_{bucket}", 21600):
+                txt = "perp overheated vs spot 🔥" if prem > 0 else "perp discount — panic selling? 😨"
+                alerts.append(f"💹 *Premium Extreme ({coin}):* {prem*100:+.3f}% — {txt}")
+    return alerts
+
+
+def check_funding_flip(state):
+    """Funding sign flips - sentiment shift ka sabse pehla ishara."""
+    alerts = []
+    for coin, _, _ in FUT_SYMBOLS:
+        hist = get_funding_hist(coin, 3)
+        if len(hist) < 2:
+            continue
+        try:
+            prev = float(hist[-2].get("fundingRate", 0))
+            cur = float(hist[-1].get("fundingRate", 0))
+        except (ValueError, TypeError):
+            continue
+        if prev == 0 or cur == 0:
+            continue
+        if (prev > 0) != (cur > 0) and abs(cur) >= 0.00002:
+            if can_alert(state, f"fflip_{coin}", 21600):
+                direction = "bearish → bullish 📈" if cur < 0 else "bullish → bearish 📉"
+                alerts.append(f"🔄 *Funding Flip ({coin}):* {prev*100:+.5f}% → {cur*100:+.5f}%/h — sentiment shift ({direction})")
+    return alerts
+
+
+def check_book_walls(state, hl_ctx):
+    """Badi single-level bid/ask walls (mid ke 2% andar) - scalping S/R."""
+    alerts = []
+    for coin, _, _ in FUT_SYMBOLS:
+        mid = (hl_ctx.get(coin) or {}).get("mid", 0)
+        if not mid:
+            continue
+        book = hl_post({"type": "l2Book", "coin": coin})
+        if not isinstance(book, dict) or "levels" not in book:
+            continue
+        try:
+            bids, asks = book["levels"][0], book["levels"][1]
+        except (IndexError, TypeError):
+            continue
+        for is_bid, levels, name in ((True, bids, "BID"), (False, asks, "ASK")):
+            best_px, best_usd = 0, 0
+            for l in levels:
+                try:
+                    px, sz = float(l["px"]), float(l["sz"])
+                except (ValueError, TypeError, KeyError):
+                    continue
+                dist = (mid - px) / mid if is_bid else (px - mid) / mid
+                if 0 <= dist <= 0.02:
+                    usd = px * sz
+                    if usd > best_usd:
+                        best_px, best_usd = px, usd
+            if best_usd >= 5_000_000 and can_alert(
+                    state, f"wall_{coin}_{name}_{int(best_px)}", 14400):
+                side = "support 🟢" if is_bid else "resistance 🔴"
+                alerts.append(f"🧱 *Book Wall ({coin}):* ${best_usd/1e6:.1f}M {name} wall "
+                              f"@ ${best_px:,.2f} ({side})")
+    return alerts
+
+
+def check_oi_divergence(state, hl_ctx):
+    """Price vs Open Interest divergence - trend me kitna dum hai."""
+    alerts = []
+    now = time.time()
+    for coin, _, _ in FUT_SYMBOLS:
+        c = hl_ctx.get(coin)
+        if not c or not c["mid"]:
+            continue
+        key = f"oidiv_hist_{coin}"
+        hist = state.get(key, [])
+        hist.append([now, c["mid"], c["oi_usd"]])
+        hist = [h for h in hist if now - h[0] <= 7200][-13:]
+        state[key] = hist
+        if len(hist) < 7:
+            continue
+        old, new = hist[0], hist[-1]
+        if not old[1] or not old[2]:
+            continue
+        px_chg = (new[1] - old[1]) / old[1]
+        oi_chg = (new[2] - old[2]) / old[2]
+        if px_chg > 0.02 and oi_chg < -0.03:
+            if can_alert(state, f"oidiv_{coin}_bear", 21600):
+                alerts.append(f"⚠️ *OI Divergence ({coin}):* price +{px_chg:.1%}, OI {oi_chg:.1%} — rally me dum nahi, short-covering lag raha hai")
+        elif px_chg < -0.02 and oi_chg > 0.03:
+            if can_alert(state, f"oidiv_{coin}_bull", 21600):
+                alerts.append(f"⚠️ *OI Divergence ({coin}):* price {px_chg:.1%}, OI +{oi_chg:.1%} — fresh shorts ban rahe, aur girawat possible")
+    return alerts
+
+
+def check_vol_breakout(state):
+    """15m candle range > 2x ATR(14) - volatility expansion (OKX candles)."""
+    alerts = []
+    for coin, _, instId in FUT_SYMBOLS:
+        try:
+            r = requests.get(OKX_API + "/api/v5/market/candles",
+                             params={"instId": instId, "bar": "15m", "limit": "20"},
+                             timeout=15).json()
+        except Exception as e:
+            print(f"[OKX CANDLES ERROR {instId}] {e}")
+            continue
+        candles = r.get("data", [])
+        done = [c for c in reversed(candles) if len(c) > 8 and c[8] == "1"]
+        if len(done) < 15:
+            continue
+        trs = []
+        for i in range(1, len(done)):
+            try:
+                h, l, pc = float(done[i][2]), float(done[i][3]), float(done[i-1][4])
+            except (ValueError, TypeError, IndexError):
+                continue
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        if len(trs) < 14:
+            continue
+        atr = sum(trs[-14:]) / 14
+        try:
+            last = done[-1]
+            rng = float(last[2]) - float(last[3])
+            o, cl = float(last[1]), float(last[4])
+        except (ValueError, TypeError, IndexError):
+            continue
+        if atr > 0 and rng > 2.0 * atr:
+            if can_alert(state, f"volbrk_{coin}", 7200):
+                chg = (cl - o) / o * 100 if o else 0
+                alerts.append(f"⚡ *Volatility Breakout ({coin}):* 15m range {rng/atr:.1f}x ATR ({chg:+.1f}%) — bada move ban raha hai")
+    return alerts
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     # Render Free Web Service + UptimeRobot keep-alive endpoint
     def do_GET(self):
@@ -530,7 +743,7 @@ def start_health_server():
 def main_loop():
     start_health_server()  # keep Render free service awake via UptimeRobot pings
     print(f"[START] Tracker running, poll every {POLL_INTERVAL}s")
-    send_telegram("✅ *Tracker Online*\nMacro + Whale + Futures (liq/funding/liquidity) alerts 24/7 shuru.")
+    send_telegram("✅ *Tracker Online*\nMacro + Whale + Futures full pack 24/7 shuru.")
     state = load_state()
     poll_count = state.get("poll_count", 0)
     while True:
@@ -551,6 +764,13 @@ def main_loop():
             alerts += check_liquidations(state, hl_ctx)       # every poll
             alerts += check_funding(state, hl_ctx)             # every poll
             alerts += check_liquidity_hl(state, hl_ctx)        # every poll
+            alerts += check_ls_ratio(state)                   # every poll
+            alerts += check_taker_pressure(state)             # every poll
+            alerts += check_premium(state)                    # every poll
+            alerts += check_funding_flip(state)               # every poll
+            alerts += check_book_walls(state, hl_ctx)         # every poll
+            alerts += check_oi_divergence(state, hl_ctx)      # every poll
+            alerts += check_vol_breakout(state)               # every poll
             if poll_count % 18 == 1:                           # every ~3 hours
                 alerts += check_btc_whales(state, btc_price)   # BTC blocks are ~8MB
 

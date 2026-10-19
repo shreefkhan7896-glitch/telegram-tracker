@@ -18,6 +18,14 @@ No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
     (crowded longs = contrarian bearish, crowded shorts = contrarian bullish)
   - Book imbalance: bid/ask liquidity 65/35 se zyada tilted ho to alert (Hyperliquid)
   - Open Interest: 8%+ change par alert (leverage build-up ya deleverage)
+- **Futures advanced pack (100% free, koi key nahi):**
+  - L/S Ratio extremes: OKX par bheed ek taraf (2.5+ long ya 0.7- short) = contrarian signal
+  - Taker pressure: aggressive buyers vs sellers ka volume (30 min window)
+  - OI + Price divergence: rally me dum hai ya nahi, ye batata hai
+  - Perp premium extremes: futures spot se ±0.1% zyada upar/neeche = overheated/panic
+  - Funding flips: funding ka sign flip = sentiment shift ka pehla ishara
+  - Book walls radar: $5M+ ki diwarein (2% ke andar) = scalping ke live S/R
+  - Volatility breakout: 15m candle 2x ATR se bada = expansion shuru
 
 Note: Binance/Bybit US IPs ko regulatory wajah se geo-block karte hain.
 Proxy/VPN se ye block todna unke ToS ke khilaaf hai (ban ka risk), isliye
