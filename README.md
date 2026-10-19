@@ -5,7 +5,8 @@ No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
 ## Kya track karta hai
 - War / geopolitical news (GDELT free API)
 - Macro bearish: DXY up, US10Y yields up, Crude spike (Yahoo Finance free)
-- Fed/FOMC/CPI breaking news + bade financial press ki crypto coverage (GDELT free API)
+- Fed/FOMC/CPI breaking news + bade financial press ki crypto coverage (GDELT free API);
+  foreign-language titles auto-translate hokar English me aate hain (🌐 tag ke saath)
 - Event calendar: FOMC + CPI dates (Fed/BLS verified) — 1 din pehle aur us din advance alert
 - Whales $1M+: ETH (Etherscan free API, har 10 min latest block), BTC
   (blockchain.info free API, har ~3 ghante latest block — BTC blocks ~8MB

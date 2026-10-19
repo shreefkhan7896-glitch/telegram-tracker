@@ -4,7 +4,8 @@ No fixed price targets. Sends crisp alerts for:
 - War / geopolitical news (bearish for crypto)
 - Macro: DXY up, US10Y yields up, Crude Oil spike (bearish)
 - Fed/Macro news: GDELT se Fed/FOMC/CPI breaking news + bade financial press
-  (Bloomberg/Reuters/WSJ/CoinDesk) ki crypto coverage par alerts
+  (Bloomberg/Reuters/WSJ/CoinDesk) ki crypto coverage par alerts;
+  foreign-language titles auto-translate hokar English me aate hain (free, no key)
 - Event calendar: FOMC + CPI dates hardcoded — 1 din pehle aur us din advance alert
 - Whales: $1M+ transfers on ETH (Etherscan, free key) and BTC (blockchain.info, no key);
   optional Whale Alert API ($10M+) if key provided
@@ -220,10 +221,47 @@ def check_war_news(state):
         if articles and can_alert(state, "war_news", 10800):
             top = articles[0]
             title = top.get("title", "War-related news")[:120]
+            title = auto_translate(title)
             alerts.append(f"🌍 *Geopolitical Alert:* {title}\nCrypto ke liye risk-off, caution rakho.")
     except Exception as e:
         print(f"[GDELT ERROR] {e}")
     return alerts
+
+
+# ============ Auto-translate: foreign-language news -> English ============
+# GDELT global hai - Chinese/Japanese/Korean/Russian/Arabic titles aa sakte hain.
+# Free Google endpoint (koi key/dependency nahi). Sirf non-Latin text translate hota hai.
+def needs_translation(text):
+    if not text:
+        return False
+    non_latin = sum(1 for ch in text if (
+        '\u4e00' <= ch <= '\u9fff' or   # CJK (Chinese)
+        '\u3040' <= ch <= '\u30ff' or   # Hiragana/Katakana (Japanese)
+        '\uac00' <= ch <= '\ud7af' or   # Korean
+        '\u0400' <= ch <= '\u04ff' or   # Cyrillic (Russian etc)
+        '\u0600' <= ch <= '\u06ff' or   # Arabic
+        '\u0e00' <= ch <= '\u0e7f'))    # Thai
+    letters = sum(1 for ch in text if ch.isalpha())
+    return letters > 0 and non_latin / letters > 0.3
+
+
+def translate_to_english(text):
+    try:
+        r = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "auto", "tl": "en", "dt": "t", "q": text},
+            timeout=15)
+        out = "".join(seg[0] for seg in r.json()[0] if seg and seg[0])
+        return out.strip() or text
+    except Exception as e:
+        print(f"[TRANSLATE ERROR] {e}")
+        return text  # fail ho to original bhej do, alert rukega nahi
+
+
+def auto_translate(title):
+    if needs_translation(title):
+        return translate_to_english(title) + " 🌐"
+    return title
 
 
 def check_macro_news(state):
@@ -249,6 +287,7 @@ def check_macro_news(state):
             if articles and can_alert(state, f"macronews_{key}", cd):
                 top = articles[0]
                 title = top.get("title", "Macro news")[:130]
+                title = auto_translate(title)
                 src = top.get("source", "")
                 alerts.append(f"{prefix} {title}\n_{src}_ — crypto par asar pad sakta hai.")
         except Exception as e:
