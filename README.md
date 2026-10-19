@@ -45,12 +45,14 @@ No fixed price targets. Sirf smart alerts. Bina credit card, bina ek rupya.
 - **Whale radar detail:** har $1M+ transfer me from→to + explorer link (tap karke
   full details); $5M+ ETH flow jo verified Binance hot wallet se jude = **inflow**
   (possible sell pressure) / **withdrawal** (holding signal) tag ke saath
-- **Meme/Alt Pump Radar:** DOGE/PEPE/SHIB/WIF/BONK/FLOKI/PENGU/TRUMP ka OKX 1H
+- **L1/L2 Pump Radar:** SOL/AVAX/NEAR/SUI/APT/SEI/INJ/ATOM/ARB/OP/DOT/POL ka OKX 1H
   volume anomaly scan (har ~30 min) — 3x+ volume + shant price = "Volume Building"
-  early warning; 3x+ volume + price up = "Pump Alert". HL perps par deeply negative
+  early warning; 3x+ volume + price up = "Pump Alert". Har alert me **RSI (15m/1H)**
+  + **spot-vs-perp fakeout check** (futures OI 24h me +15% se zyada = high-leverage
+  trap, OI flat/girta = real spot buying). **Relative strength:** BTC 1h me 2.5%+ gire
+  lekin koi watchlist coin hold kare (top 3) = alag alert. HL perps par deeply negative
   funding + solid OI wale alts = short-squeeze setups. Note: koi indicator pump ki
   100% guarantee nahi deta — volume-leads-price hi asal edge hai
-  [REMOVED v8: user ne meme coins hatane ko kaha — ab sirf L1/L2 watchlist]
 
 Note: Binance/Bybit US IPs ko regulatory wajah se geo-block karte hain.
 Proxy/VPN se ye block todna unke ToS ke khilaaf hai (ban ka risk), isliye

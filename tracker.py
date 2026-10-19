@@ -24,11 +24,13 @@ No fixed price targets. Sends crisp alerts for:
 - Whale radar: $1M+ ETH/BTC transfers (Etherscan free key / blockchain.info),
   har transfer me from→to + explorer link; $5M+ ETH flow jo verified Binance hot
   wallet ko chhooe = inflow (possible sell pressure) / withdrawal (holding signal) tag.
-- Meme/Alt Pump Radar: OKX 1H candles par DOGE/PEPE/SHIB/WIF/BONK/FLOKI/PENGU/TRUMP ka
-  volume anomaly scan — 3x+ volume + shant price = "Volume Building" (pump se pehle
-  wala early warning); 3x+ volume + price up = "Pump Alert". Plus HL perps par
-  deeply negative funding + solid OI wale alts = short-squeeze setups. (Note: koi
-  indicator pump ki 100% guarantee nahi deta — volume-leads-price hi asal edge hai.)
+- L1/L2 Pump Radar: OKX 1H candles par SOL/AVAX/NEAR/SUI/APT/SEI/INJ/ATOM/ARB/OP/DOT/POL
+  ka volume anomaly scan — 3x+ volume + shant price = "Volume Building" (pump se pehle
+  wala early warning); 3x+ volume + price up = "Pump Alert". Har alert me RSI (15m/1H)
+  + spot-vs-perp fakeout check (futures OI surge = high-leverage trap, OI flat = real
+  spot buying). Plus: BTC dump me hold karne wale alts = relative strength alerts;
+  HL perps par deeply negative funding + solid OI wale alts = short-squeeze setups.
+  (Note: koi indicator pump ki 100% guarantee nahi deta — volume-leads-price hi asal edge hai.)
 - Market Pulse: 0-100 bullish/bearish gauge (BTC 50% + ETH 30% + SOL 20%) from taker flow,
   L/S ratio (contrarian), funding (contrarian), 24h momentum, OI change.
   Report me verdict + main driver + flip watch + Fear&Greed/BTC.D context.
@@ -847,8 +849,120 @@ def check_vol_breakout(state):
         if atr > 0 and rng > 2.0 * atr:
             if can_alert(state, f"volbrk_{coin}", 7200):
                 chg = (cl - o) / o * 100 if o else 0
-                alerts.append(f"⚡ *Volatility Breakout ({coin}):* 15m range {rng/atr:.1f}x ATR ({chg:+.1f}%) — bada move ban raha hai")
+                # v8.1: direction context — taker pressure + book imbalance isi message me
+                tr = get_taker_ratio_now(coin)
+                imb = get_book_imb_now(coin)
+                bits = [f"⚡ *Volatility Breakout ({coin}):* 15m range {rng/atr:.1f}x ATR ({chg:+.1f}%)"]
+                if tr is not None:
+                    tside = "buyers 🟢" if tr >= 1.2 else "sellers 🔴" if tr <= 0.83 else "mixed ⚪"
+                    bits.append(f"taker {tr:.2f}x {tside}")
+                if imb is not None:
+                    bside = "BID-heavy 🟢" if imb > 0.1 else "ASK-heavy 🔴" if imb < -0.1 else "balanced ⚪"
+                    bits.append(f"book {bside} ({imb:+.0%})")
+                up = (chg > 0) + (tr is not None and tr >= 1.2) + (imb is not None and imb > 0.1)
+                dn = (chg < 0) + (tr is not None and tr <= 0.83) + (imb is not None and imb < -0.1)
+                bits.append("📈 *UP move*" if up > dn else "📉 *DOWN move*" if dn > up else "↔️ direction mixed")
+                alerts.append(" — ".join(bits))
     return alerts
+
+
+# ============ v8.1 helpers: RSI, taker, book imbalance, OI change, 1h change ============
+def rsi_wilder(closes, period=14):
+    """Wilder's RSI from oldest-first closes. None if not enough data."""
+    if len(closes) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    for g, l in zip(gains[period:], losses[period:]):
+        ag = (ag * (period - 1) + g) / period
+        al = (al * (period - 1) + l) / period
+    if al == 0:
+        return 100.0
+    return 100.0 - 100.0 / (1.0 + ag / al)
+
+
+def get_rsi(instId, bar):
+    """RSI(14) for OKX instId on bar (15m/1H). None on failure."""
+    try:
+        r = requests.get(OKX_API + "/api/v5/market/candles",
+                         params={"instId": instId, "bar": bar, "limit": "30"},
+                         timeout=15).json()
+        cs = r.get("data", [])
+        closes = [float(c[4]) for c in reversed(cs[1:]) if len(c) > 4]  # skip forming candle
+        return rsi_wilder(closes)
+    except Exception as e:
+        print(f"[RSI ERROR {instId} {bar}] {e}")
+        return None
+
+
+def get_taker_ratio_now(coin):
+    """OKX taker buy/sell ratio, last ~30 min (CONTRACTS). None on failure."""
+    try:
+        r = requests.get(OKX_API + "/api/v5/rubik/stat/taker-volume",
+                         params={"ccy": coin, "instType": "CONTRACTS"}, timeout=15).json()
+        data = r.get("data", [])
+        if len(data) < 6:
+            return None
+        buy = sell = 0.0
+        for row in data[:6]:
+            try:
+                buy += float(row[1]); sell += float(row[2])
+            except (ValueError, TypeError, IndexError):
+                continue
+        return buy / sell if sell > 0 else None
+    except Exception as e:
+        print(f"[TAKER NOW ERROR {coin}] {e}")
+        return None
+
+
+def get_book_imb_now(coin):
+    """Hyperliquid l2Book bid/ask imbalance in [-1, 1]. None on failure."""
+    try:
+        book = hl_post({"type": "l2Book", "coin": coin})
+        if isinstance(book, dict) and "levels" in book:
+            bids, asks = book["levels"][0], book["levels"][1]
+            bv = sum(float(l["px"]) * float(l["sz"]) for l in bids[:20])
+            av = sum(float(l["px"]) * float(l["sz"]) for l in asks[:20])
+            if bv + av > 0:
+                return (bv - av) / (bv + av)
+    except Exception as e:
+        print(f"[BOOK NOW ERROR {coin}] {e}")
+    return None
+
+
+def get_oi_change_pct(coin, hours=24):
+    """OKX futures OI % change over `hours` — rubik open-interest-volume (server-side history, no warmup)."""
+    try:
+        r = requests.get(OKX_API + "/api/v5/rubik/stat/contracts/open-interest-volume",
+                         params={"ccy": coin, "period": "1H"}, timeout=15).json()
+        d = r.get("data", [])  # newest-first: [ts, oi, volume]
+        if len(d) < hours + 1:
+            return None
+        now_oi = float(d[0][1]); old_oi = float(d[hours][1])
+        return (now_oi - old_oi) / old_oi if old_oi else None
+    except Exception as e:
+        print(f"[OI HIST ERROR {coin}] {e}")
+        return None
+
+
+def get_chg_1h(instId):
+    """Last completed 1H candle % change. None on failure."""
+    try:
+        r = requests.get(OKX_API + "/api/v5/market/candles",
+                         params={"instId": instId, "bar": "1H", "limit": "3"},
+                         timeout=15).json()
+        cs = r.get("data", [])
+        if len(cs) < 3:
+            return None
+        return (float(cs[1][4]) / float(cs[2][4]) - 1) * 100
+    except Exception as e:
+        print(f"[CHG1H ERROR {instId}] {e}")
+        return None
 
 
 # ============ L1/L2 Pump Radar: volume anomaly = early warning ============
@@ -883,19 +997,67 @@ def check_pump_radar(state):
             chg_24h = (last_close / float(cs[24][4]) - 1) * 100
             coin = sym.split("-")[0]
             if vratio >= 3:
+                # v8.1: RSI filter + spot-vs-perp fakeout check (sirf alert par, extra calls)
+                rsi15 = get_rsi(sym, "15m")
+                rsi1h = get_rsi(sym, "1H")
+                rsi_txt = ""
+                if rsi15 is not None or rsi1h is not None:
+                    rb = []
+                    if rsi15 is not None:
+                        rb.append(f"15m {rsi15:.0f}")
+                    if rsi1h is not None:
+                        rb.append(f"1H {rsi1h:.0f}")
+                    ob = ((rsi15 is not None and rsi15 >= 70) or
+                          (rsi1h is not None and rsi1h >= 70))
+                    rsi_txt = f" | RSI {'/'.join(rb)}{' ⚠️ OVERBOUGHT' if ob else ''}"
+                oi_chg = get_oi_change_pct(coin, 24)
+                fake_txt = ""
+                if oi_chg is not None:
+                    if oi_chg > 0.15:
+                        fake_txt = (f" | ⚠️ *High-Leverage Fakeout* risk "
+                                    f"(futures OI +{oi_chg:.0%}/24h — leverage pile ho raha hai, bull trap se bacho)")
+                    elif oi_chg < 0.05:
+                        fake_txt = (f" | ✅ *Real Spot Buying* "
+                                    f"(futures OI {oi_chg:+.0%}/24h — leverage nahi badh raha)")
+                    else:
+                        fake_txt = f" | OI {oi_chg:+.0%}/24h (mixed)"
                 if chg_1h >= 8 or chg_24h >= 20:
                     if can_alert(state, f"pumpgo_{coin}", 10800):
                         alerts.append(
                             f"🚀 *Pump Alert ({coin}):* {chg_1h:+.1f}% (1h) / {chg_24h:+.1f}% (24h), "
-                            f"volume {vratio:.1f}x average — momentum chal raha hai!")
+                            f"volume {vratio:.1f}x average — momentum chal raha hai!"
+                            f"{rsi_txt}{fake_txt}")
                 elif chg_1h < 5 and chg_24h < 15:
                     if can_alert(state, f"pumpbuild_{coin}", 21600):
                         alerts.append(
                             f"👀 *Volume Building ({coin}):* 1H volume {vratio:.1f}x average, "
                             f"price {chg_1h:+.1f}% (1h) / {chg_24h:+.1f}% (24h) — "
-                            f"pump se pehle wala signal, nazar rakho.")
+                            f"pump se pehle wala signal, nazar rakho."
+                            f"{rsi_txt}{fake_txt}")
         except Exception as e:
             print(f"[PUMP RADAR ERROR {sym}] {e}")
+    return alerts
+
+
+def check_relative_strength(state):
+    """BTC tez gire (1h <= -2.5%) lekin watchlist coin hold kare (1h >= -0.5%)
+    = relative strength — market rukte hi ye sabse tez bhag sakta hai. Top 3 hi alert."""
+    alerts = []
+    btc_chg = get_chg_1h("BTC-USDT")
+    if btc_chg is None or btc_chg > -2.5:
+        return alerts  # BTC tez nahi gir raha
+    strong = []
+    for sym in PUMP_WATCHLIST:
+        c = get_chg_1h(sym)
+        if c is not None and c >= -0.5:
+            strong.append((sym.split("-")[0], c))
+    strong.sort(key=lambda x: x[1], reverse=True)
+    for coin, c in strong[:3]:
+        if can_alert(state, f"rs_{coin}", 21600):
+            alerts.append(
+                f"💪 *Relative Strength ({coin}):* BTC 1h {btc_chg:+.1f}% gira lekin "
+                f"{coin} {c:+.1f}% — dump me hold kar raha hai. Market rukte hi "
+                f"ye sabse tez bhag sakta hai.")
     return alerts
 
 
@@ -1228,6 +1390,7 @@ def main_loop():
                 alerts += check_macro_news(state)  # Fed news + financial press crypto coverage
                 alerts += check_pump_radar(state)  # L1/L2 volume anomaly (OKX 1H)
                 alerts += check_alt_squeeze(state)  # HL alt funding squeeze setups
+                alerts += check_relative_strength(state)  # BTC dump me hold karne wale alts
                 alerts += check_fear_greed(state)  # Fear & Greed extremes
             if poll_count % 6 == 1:  # every ~1 hour
                 alerts += check_btc_dominance(state)  # BTC.D trend (CoinGecko global)
