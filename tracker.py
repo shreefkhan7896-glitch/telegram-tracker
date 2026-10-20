@@ -21,9 +21,12 @@ No fixed price targets. Sends crisp alerts for:
   - Funding flips (Hyperliquid) - sentiment shift
   - Book walls radar (Hyperliquid) - scalping S/R
   - Volatility breakout 2x ATR (OKX candles) - expansion alerts
-- Whale radar: $1M+ ETH/BTC transfers (Etherscan free key / blockchain.info),
-  har transfer me from→to + explorer link; $5M+ ETH flow jo verified Binance hot
-  wallet ko chhooe = inflow (possible sell pressure) / withdrawal (holding signal) tag.
+- Whale radar (v8.3): $1M+ ETH/BTC transfers (Etherscan free key / blockchain.info).
+  BTC me net outflow count hota hai (change wapas sender ko = count nahi), exchange
+  wallets heuristic se tag hote hain, ek block ke batch moves summary me jate hain.
+  Instant alert SIRF strong directional flow ($50M+) par, seedhi action line ke saath:
+  exchange se bahar = STRONG BUY, exchange ke andar = DUMP ALERT. Baaki saare flows
+  (chhote, neutral, routine batch) Pulse digest me ek line ke hisaab me aate hain.
 - L1/L2 Pump Radar: OKX 1H candles par SOL/AVAX/NEAR/SUI/APT/SEI/INJ/ATOM/ARB/OP/DOT/POL
   ka volume anomaly scan — 3x+ volume + shant price = "Volume Building" (pump se pehle
   wala early warning); 3x+ volume + price up = "Pump Alert". Har alert me RSI (15m/1H)
@@ -81,6 +84,8 @@ ETHERSCAN_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SEC", "600"))
 
 WHALE_USD_THRESHOLD = 1_000_000  # $1M+ transfers count as whale moves
+WHALE_STRONG_USD = 50_000_000    # v8.3: instant whale alert SIRF $50M+ directional flow par;
+                                 # chhote/neutral flows Pulse digest ke hisaab me jate hain
 
 # ============ Whale exchange-flow radar (curated known wallets) ============
 # Verified 2026-10-19 via BaseScan/Arkham labels. Curated list - sirf Binance
@@ -90,7 +95,7 @@ KNOWN_EXCHANGE_WALLETS = {
     "0xf977814e90da44bfa03b6295a0616a897441acec": "Binance",
     "0x28c6c06298d514db089934071355e5743bf21d60c": "Binance",
 }
-WHALE_EXCHANGE_FLOW_USD = 5_000_000  # isse bada exchange flow = special alert line
+WHALE_EXCHANGE_FLOW_USD = 5_000_000  # (legacy v6 threshold — v8.3 se instant ke liye WHALE_STRONG_USD lagta hai)
 
 # --- Futures data: 100% free, no API keys ---
 # Exchange priority: Binance first (biggest volume), automatic fallback to
@@ -360,8 +365,20 @@ def check_whales(state):
         print(f"[WHALE ERROR] {e}")
     return alerts
 
+def whale_digest_add(state, direction, usd):
+    """v8.3: chhote/neutral whale flows ka hisaab — instant alert NAHI.
+    Pulse digest me ek line me aata hai (exchange se bahar / andar / wallet-to-wallet)."""
+    d = state.setdefault("whale_digest", {"in": 0.0, "out": 0.0, "neutral": 0.0, "n": 0})
+    if direction not in ("in", "out", "neutral"):
+        direction = "neutral"
+    d[direction] = d.get(direction, 0.0) + usd
+    d["n"] = d.get("n", 0) + 1
+
+
 def check_eth_whales(state, eth_price):
-    """Scan latest ETH block for $1M+ transfers. Etherscan free key, no card."""
+    """Scan latest ETH block for $1M+ transfers. Etherscan free key, no card.
+    v8.3: instant alert SIRF $50M+ verified-exchange flow par (action line ke saath);
+    baaki saare flows Pulse digest ke hisaab me jate hain — koi shor nahi."""
     alerts = []
     if not ETHERSCAN_KEY or not eth_price:
         return alerts
@@ -388,23 +405,64 @@ def check_eth_whales(state, eth_price):
                 if h and can_alert(state, f"ethw_{h}", 86400):
                     frm_full = (tx.get("from") or "").lower()
                     to_full = (tx.get("to") or "").lower()
-                    frm = (tx.get("from") or "?")[:12]
-                    to = (tx.get("to") or "contract")[:12]
-                    tag = ""
-                    if usd >= WHALE_EXCHANGE_FLOW_USD:
-                        if to_full in KNOWN_EXCHANGE_WALLETS:
-                            tag = f"\n➡️ *{KNOWN_EXCHANGE_WALLETS[to_full]} inflow* — possible sell pressure"
-                        elif frm_full in KNOWN_EXCHANGE_WALLETS:
-                            tag = f"\n⬅️ *{KNOWN_EXCHANGE_WALLETS[frm_full]} withdrawal* — holding signal"
-                    alerts.append(
-                        f"🐋 *ETH Whale:* {val_eth:,.0f} ETH (${usd:,.0f})\n`{frm}...` → `{to}...`{tag}\n[🔍 tx details](https://etherscan.io/tx/{h})")
+                    if to_full in KNOWN_EXCHANGE_WALLETS:
+                        direction, exch = "in", KNOWN_EXCHANGE_WALLETS[to_full]
+                    elif frm_full in KNOWN_EXCHANGE_WALLETS:
+                        direction, exch = "out", KNOWN_EXCHANGE_WALLETS[frm_full]
+                    else:
+                        direction, exch = "neutral", ""
+                    if direction != "neutral" and usd >= WHALE_STRONG_USD and len(alerts) < 2:
+                        frm = (tx.get("from") or "?")[:12]
+                        to = (tx.get("to") or "contract")[:12]
+                        if direction == "in":
+                            alerts.append(
+                                f"🐋 *ETH Whale:* {val_eth:,.0f} ETH (${usd:,.0f})\n"
+                                f"🏦 {exch} ke ANDAR aaya — bechne ke liye\n`{frm}...` → `{to}...`\n"
+                                f"⚠️ *Signal: DUMP ALERT* (Bechne ke liye exchange par aaya)\n"
+                                f"[🔍 tx details](https://etherscan.io/tx/{h})")
+                        else:
+                            alerts.append(
+                                f"🐋 *ETH Whale:* {val_eth:,.0f} ETH (${usd:,.0f})\n"
+                                f"🏦 {exch} se BAHAR gaya — hold karne ke liye\n`{frm}...` → `{to}...`\n"
+                                f"🔥 *Signal: STRONG BUY* (Bada maal exchange se bahar gaya)\n"
+                                f"[🔍 tx details](https://etherscan.io/tx/{h})")
+                    else:
+                        whale_digest_add(state, direction, usd)
     except Exception as e:
         print(f"[ETH WHALE ERROR] {e}")
     return alerts
 
 
+def btc_addr_is_exchange(state, addr):
+    """v8.3 heuristic: bohat zyada transactions/volume wala BTC address kisi
+    individual whale ka nahi ho sakta — exchange/service wallet hai.
+    blockchain.info se check, result state me cache. Fail = False (retry next time)."""
+    if not addr:
+        return False
+    cache = state.setdefault("btc_addr_tags", {})
+    if addr in cache:
+        return cache[addr]
+    try:
+        r = requests.get(f"https://blockchain.info/address/{addr}?format=json&limit=0", timeout=15)
+        j = r.json()
+        n_tx = j.get("n_tx", 0) or 0
+        recv_btc = (j.get("total_received", 0) or 0) / 1e8
+        tag = bool(n_tx >= 1000 or recv_btc >= 5000)
+    except Exception as e:
+        print(f"[BTC ADDR TAG ERROR] {e}")
+        return False  # cache mat karo — agle scan me phir try hoga
+    if len(cache) > 500:
+        cache.clear()
+    cache[addr] = tag
+    return tag
+
+
 def check_btc_whales(state, btc_price):
-    """Scan latest BTC block for $1M+ transfers. blockchain.info, no key needed."""
+    """Scan latest BTC block for $1M+ NET outflows. blockchain.info, no key needed.
+    v8.3: (1) sirf bahar gaya paisa count hota hai — change wapas sender ko = exclude;
+    (2) exchange wallets heuristic se tag; (3) ek hi sender ke 3+ moves ek block me =
+    routine batch, koi instant alert nahi; (4) instant alert SIRF $50M+ directional
+    flow par, seedhi action line ke saath. Baaki sab Pulse digest ke hisaab me."""
     alerts = []
     if not btc_price:
         return alerts
@@ -425,16 +483,78 @@ def check_btc_whales(state, btc_price):
             print("[BTC WHALE] rawblock fetch failed, will retry next run")
             return alerts
         state["btc_last_block"] = h  # mark scanned only after successful fetch
+        # Paso 1: saare bade tx parse karo — net outflow (change exclude) ke saath
+        moves = []  # (usd, net_btc, sender, top_receiver, txid)
+        sender_count = {}
         for tx in block.get("tx", []):
-            total_sat = sum(o.get("value", 0) for o in tx.get("out", []))
-            usd = total_sat / 1e8 * btc_price
-            if usd >= WHALE_USD_THRESHOLD:
-                th = tx.get("hash", "")
-                if th and can_alert(state, f"btcw_{th}", 86400):
-                    btc_amt = total_sat / 1e8
-                    outs = sorted(tx.get("out", []), key=lambda o: o.get("value", 0), reverse=True)
-                    top_addr = (outs[0].get("addr", "") if outs else "")[:14]
-                    alerts.append(f"🐋 *BTC Whale:* {btc_amt:,.1f} BTC (${usd:,.0f})\n→ `{top_addr}...`\n[🔍 tx details](https://blockchain.info/tx/{th})")
+            in_addrs = set()
+            in_by_addr = {}
+            for i in tx.get("inputs", []):
+                po = i.get("prev_out") or {}
+                a, v = po.get("addr", ""), po.get("value", 0) or 0
+                if a:
+                    in_addrs.add(a)
+                    in_by_addr[a] = in_by_addr.get(a, 0) + v
+            if not in_addrs:
+                continue  # coinbase tx (miner reward) — whale move nahi
+            net_sat, top_addr, top_val = 0, "", 0
+            for o in tx.get("out", []):
+                a, v = o.get("addr", ""), o.get("value", 0) or 0
+                if a and a not in in_addrs:  # apne hi address par wapas = change, count nahi
+                    net_sat += v
+                    if v > top_val:
+                        top_addr, top_val = a, v
+            usd = net_sat / 1e8 * btc_price
+            if usd < WHALE_USD_THRESHOLD:
+                continue
+            th = tx.get("hash", "")
+            if not th or not can_alert(state, f"btcw_{th}", 86400):
+                continue
+            sender = max(in_by_addr, key=in_by_addr.get)
+            moves.append((usd, net_sat / 1e8, sender, top_addr, th))
+            sender_count[sender] = sender_count.get(sender, 0) + 1
+        # Paso 2: har move ka verdict — exchange tag lookups per-scan max 8 (rate limit safety)
+        lookups = [0]
+
+        def is_exch(addr):
+            if not addr:
+                return False
+            cache = state.setdefault("btc_addr_tags", {})
+            if addr in cache:
+                return cache[addr]
+            if lookups[0] >= 8:
+                return False
+            lookups[0] += 1
+            return btc_addr_is_exchange(state, addr)
+
+        for usd, net_btc, sender, recv, th in sorted(moves, reverse=True):
+            s_ex = is_exch(sender)
+            r_ex = is_exch(recv) if recv else False
+            if s_ex and not r_ex:
+                direction = "out"   # exchange se bahar
+            elif r_ex and not s_ex:
+                direction = "in"    # exchange ke andar
+            else:
+                direction = "neutral"
+            batch = sender_count.get(sender, 0) >= 3  # ek hi sender, kai moves = routine batch
+            strong = direction != "neutral" and not batch and usd >= WHALE_STRONG_USD
+            if not strong:
+                whale_digest_add(state, direction, usd)  # shor nahi — sirf hisaab
+                continue
+            if len(alerts) >= 2:  # ek scan me max 2 instant whale alerts
+                whale_digest_add(state, direction, usd)
+                continue
+            link = f"[🔍 tx details](https://blockchain.info/tx/{th})"
+            if direction == "out":
+                alerts.append(
+                    f"🐋 *BTC Whale:* {net_btc:,.1f} BTC (${usd:,.0f})\n"
+                    f"🏦 Exchange se BAHAR gaya — hold karne ke liye\n`{sender[:14]}...` → `{recv[:14]}...`\n"
+                    f"🔥 *Signal: STRONG BUY* (Bada maal exchange se bahar gaya)\n{link}")
+            else:
+                alerts.append(
+                    f"🐋 *BTC Whale:* {net_btc:,.1f} BTC (${usd:,.0f})\n"
+                    f"🏦 Exchange ke ANDAR aaya — bechne ke liye\n`{sender[:14]}...` → `{recv[:14]}...`\n"
+                    f"⚠️ *Signal: DUMP ALERT* (Bechne ke liye exchange par aaya)\n{link}")
     except Exception as e:
         print(f"[BTC WHALE ERROR] {e}")
     return alerts
@@ -1526,7 +1646,21 @@ def check_market_pulse(state, hl_ctx, prices):
     # trigger 3: periodic digest
     if PULSE_DIGEST_HOURS > 0 and now - state.get("pulse_digest_ts", 0) >= PULSE_DIGEST_HOURS * 3600:
         state["pulse_digest_ts"] = now
-        alerts.append(pulse_report_text(score, label, subs, hl_ctx, "🎯 *Market Pulse Digest*", extra))
+        dextra = extra
+        # v8.3: chhote/neutral whale flows ka hisaab ek line me (instant shor ki jagah)
+        wd = state.get("whale_digest") or {}
+        if wd.get("n"):
+            wbits = []
+            if wd.get("out"):
+                wbits.append(f"exchange se bahar ${wd['out'] / 1e6:,.0f}M")
+            if wd.get("in"):
+                wbits.append(f"exchange me andar ${wd['in'] / 1e6:,.0f}M")
+            if wd.get("neutral"):
+                wbits.append(f"wallet-to-wallet ${wd['neutral'] / 1e6:,.0f}M")
+            if wbits:
+                dextra = (extra + " | " if extra else "") + "🐋 Whale flows: " + " • ".join(wbits)
+            state["whale_digest"] = {"in": 0.0, "out": 0.0, "neutral": 0.0, "n": 0}
+        alerts.append(pulse_report_text(score, label, subs, hl_ctx, "🎯 *Market Pulse Digest*", dextra))
     return alerts
 
 
